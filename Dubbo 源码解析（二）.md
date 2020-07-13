@@ -3498,10 +3498,1972 @@ public class InvokerInvocationHandler implements InvocationHandler {
 > result = this.invoker.invoke(invocation);
 >
 > MockClusterInvoker是对FailoverClusterInvoker的包裹。然后经过负载均衡，调用真实的DubboInvoker。
+>
+> ![image-20200702154031102](https://gitee.com/wangigor/typora-images/raw/master/dubbinvoker-rpcInvocation-debug.png)
+>
+> 从调用方法开始。经过了dubbo默认的javassist生成的代理，拦截方法->InvokerInvocationHandler执行经过mork，经过Failover服务集群，经过负载均衡器的选择，最终实现invoker的调用。DubboInvoker也是经过了各种包裹和代理。这个稍后再看，直接看调用。
+>
+> RpcInvocation记录了当前这一次调用的所有信息。包括方法名，service类型，请求参数，选择的invoker，返回类型，调用模式等。
+
+```java
+    
+		//DubboInvoker extends AbstractInvoker
+		protected Result doInvoke(final Invocation invocation) throws Throwable {
+        RpcInvocation inv = (RpcInvocation) invocation;
+      	//调用目标方法名
+        final String methodName = RpcUtils.getMethodName(invocation);
+      	//设置目标类的全限定名
+        inv.setAttachment(PATH_KEY, getUrl().getPath());
+      	//设置版本号 默认0.0.0
+        inv.setAttachment(VERSION_KEY, version);
+
+      	//获取网络通信客户端
+        ExchangeClient currentClient;
+        if (clients.length == 1) {
+            currentClient = clients[0];
+        } else {
+            currentClient = clients[index.getAndIncrement() % clients.length];
+        }
+      	
+        try {
+          	//isOneway为true。表示 单向 通信。异步无返回值
+            boolean isOneway = RpcUtils.isOneway(getUrl(), invocation);
+          	//获取超时时间
+            int timeout = getUrl().getMethodPositiveParameter(methodName, TIMEOUT_KEY, DEFAULT_TIMEOUT);
+          	//异步无返回值
+            if (isOneway) {
+                boolean isSent = getUrl().getMethodParameter(methodName, Constants.SENT_KEY, false);
+              	//发送请求
+                currentClient.send(inv, isSent);
+              	//返回一个空的RpcResult
+                return AsyncRpcResult.newDefaultAsyncResult(invocation);
+            } else {
+              	//有返回值
+                AsyncRpcResult asyncRpcResult = new AsyncRpcResult(inv);
+              	//发送请求。返回一个CompletableFuture
+                CompletableFuture<Object> responseFuture = currentClient.request(inv, timeout);
+              	//rpc结果对CompletableFuture进行订阅。
+                asyncRpcResult.subscribeTo(responseFuture);
+                // save for 2.6.x compatibility, for example, TraceFilter in Zipkin uses com.alibaba.xxx.FutureAdapter
+                //放到请求上下文中
+              	FutureContext.getContext().setCompatibleFuture(responseFuture);
+                return asyncRpcResult;
+            }
+        } catch (TimeoutException e) {
+            throw new RpcException(RpcException.TIMEOUT_EXCEPTION, "Invoke remote method timeout. method: " + invocation.getMethodName() + ", provider: " + getUrl() + ", cause: " + e.getMessage(), e);
+        } catch (RemotingException e) {
+            throw new RpcException(RpcException.NETWORK_EXCEPTION, "Failed to invoke remote method: " + invocation.getMethodName() + ", provider: " + getUrl() + ", cause: " + e.getMessage(), e);
+        }
+    }
+```
+
+#### 网络通信
+
+> 发送请求currentClient.request(inv, timeout);
+>
+> ![image-20200702170722504](https://gitee.com/wangigor/typora-images/raw/master/dubbo-invoker-trace.png)
+>
+> 调用栈从DubboInvoker开始，经过了ReferenceCountExchangeClient、HeaderExchangeClient、HeaderExchangeChannel、NettyChannel，猜到了netty的消息发送。
+
+网络通信采用C/S模式的传统架构，有几个概念需要先理清楚。
+
+##### ==几个重要组件==
+
+###### EndPoint 端
+
+> Endpoint是个抽象的概念，大概是一个**能够发生网络通信的节点**。端 是通道（Channel）、客户端（Client）、服务端（Server）三者的抽象。
+>
+> - 通过url进行身份区分，通道和客户端中的url是同一个引用。
+> - 记录了可以进行网络通信的本机真实物理网络地址     InetSocketAddress 。
+> - 能够主动发起消息传递操作。
+> - 具有感知通信事件的能力 ChannelHandler。
+
+```java
+public interface Endpoint {
+
+    URL getUrl();
+
+    ChannelHandler getChannelHandler();
+
+    InetSocketAddress getLocalAddress();
+
+    void send(Object message) throws RemotingException;
+
+    void send(Object message, boolean sent) throws RemotingException;
+
+    void close();
+
+    void close(int timeout);
+
+    void startClose();
+
+    boolean isClosed();
+
+}
+```
+
+###### Channel 通道
+
+> Channel通道扩展了Endpoint端接口。
+>
+> - 可以向Channel写入或者从中读取上下文本地属性
+>
+> - 从Channel的一侧能够获取到另一侧的物理网络地址
+>
+> - 能够检测当前Channel的双端是否还处于连接状态
+
+```java
+public interface Channel extends Endpoint {
+
+    InetSocketAddress getRemoteAddress();
+
+    boolean isConnected();
+
+    boolean hasAttribute(String key);
+
+    Object getAttribute(String key);
+
+    void setAttribute(String key, Object value);
+
+    void removeAttribute(String key);
+}
+```
+
+
+
+###### Client客户端和Server服务端
+
+> 客户端Client继承了Channel，服务端Server成员属性里存了Channel集合。
+>
+> 都实现了Resetable和IdleSensible接口。
+>
+> - Resetable接口用于重置本地上下文中的参数
+>
+> ```java
+> public interface Resetable {
+> 
+>     void reset(URL url);
+> }
+> ```
+>
+> - IdleSensible接口标记了是否对空闲连接进行操作，具体的操作要各自实现，嵌入到自己的逻辑中。
+>
+> client发送心跳，server关闭连接。
+>
+> ```java
+> public interface IdleSensible {
+>     default boolean canHandleIdle() {
+>         return false;
+>     }
+> }
+> ```
+>
+> 目前这个接口的实现都是返回true。
+
+
+
+```java
+//客户端
+public interface Client extends Endpoint, Channel, Resetable, IdleSensible {
+
+    void reconnect() throws RemotingException;
+}
+```
+
+```java
+//服务端
+public interface Server extends Endpoint, Resetable, IdleSensible {
+
+    boolean isBound();
+
+    Collection<Channel> getChannels();
+
+    Channel getChannel(InetSocketAddress remoteAddress);
+
+}
+```
+
+###### ChannelHandler通道事件处理器
+
+> Channel是Client和Server的传输通道，通讯过程中会发生**连接、断连、发送数据、接收数据、异常捕获**5中事件。
+
+```java
+public interface ChannelHandler {
+
+    void connected(Channel channel) throws RemotingException;
+
+    void disconnected(Channel channel) throws RemotingException;
+
+    void sent(Channel channel, Object message) throws RemotingException;
+
+    void received(Channel channel, Object message) throws RemotingException;
+
+    void caught(Channel channel, Throwable exception) throws RemotingException;
+
+}
+```
 
 
 
 
+
+##### ReferenceCountExchangeClient 引用计数器
+
+> 维护了当前网络通信客户端的引用计数器。有几个invoker引用就是几。全部invoker销毁【调用close】，exchangeClient销毁。
+
+```java
+final class ReferenceCountExchangeClient implements ExchangeClient {
+
+  	//invoker的url
+    private final URL url;
+  	//原子计数
+    private final AtomicInteger referenceCount = new AtomicInteger(0);
+
+  	//HeaderExchangeClient
+    private ExchangeClient client;
+
+    public ReferenceCountExchangeClient(ExchangeClient client) {
+        this.client = client;
+      	//引用计数器递增
+        referenceCount.incrementAndGet();
+        this.url = client.getUrl();
+    }
+
+  	//{省略}
+
+  	//发送请求
+    @Override
+    public CompletableFuture<Object> request(Object request, int timeout) throws RemotingException {
+        return client.request(request, timeout);
+    }
+
+
+    //立即关闭
+    @Override
+    public void close() {
+        close(0);
+    }
+		//延迟关闭
+    @Override
+    public void close(int timeout) {
+      	//引用计数递减
+        if (referenceCount.decrementAndGet() <= 0) {
+          	//到0，执行销毁
+            if (timeout == 0) {
+                client.close();
+
+            } else {
+                client.close(timeout);
+            }
+
+            replaceWithLazyClient();
+        }
+    }
+
+    //当client被关闭时，会把client设置成LazyConnectExchangeClient，等待新的调用者来唤醒。
+    private void replaceWithLazyClient() {
+        // this is a defensive operation to avoid client is closed by accident, the initial state of the client is false
+        URL lazyUrl = URLBuilder.from(url)
+                .addParameter(LAZY_CONNECT_INITIAL_STATE_KEY, Boolean.FALSE)
+                .addParameter(RECONNECT_KEY, Boolean.FALSE)
+                .addParameter(SEND_RECONNECT_KEY, Boolean.TRUE.toString())
+                .addParameter("warning", Boolean.TRUE.toString())
+                .addParameter(LazyConnectExchangeClient.REQUEST_WITH_WARNING_KEY, true)
+                .addParameter("_client_memo", "referencecounthandler.replacewithlazyclient")
+                .build();
+
+        /**
+         * the order of judgment in the if statement cannot be changed.
+         */
+        if (!(client instanceof LazyConnectExchangeClient) || client.isClosed()) {
+            client = new LazyConnectExchangeClient(lazyUrl, client.getExchangeHandler());
+        }
+    }
+
+
+    //供外部调用的引用计数自增方法
+    public void incrementAndGetCount() {
+        referenceCount.incrementAndGet();
+    }
+}
+```
+
+##### HeaderExchangeClient心跳检测
+
+> TODO 这里先不看
+
+```java
+public class HeaderExchangeClient implements ExchangeClient {
+
+  	//nettyClient
+    private final Client client;
+    private final ExchangeChannel channel;
+		
+    private static final HashedWheelTimer IDLE_CHECK_TIMER = new HashedWheelTimer(
+            new NamedThreadFactory("dubbo-client-idleCheck", true), 1, TimeUnit.SECONDS, TICKS_PER_WHEEL);
+    private HeartbeatTimerTask heartBeatTimerTask;
+    private ReconnectTimerTask reconnectTimerTask;
+
+    public HeaderExchangeClient(Client client, boolean startTimer) {
+        Assert.notNull(client, "Client can't be null");
+        this.client = client;
+        this.channel = new HeaderExchangeChannel(client);
+
+        if (startTimer) {
+            URL url = client.getUrl();
+            startReconnectTask(url);
+            startHeartBeatTask(url);
+        }
+    }
+
+  	//调用channel发送请求
+    @Override
+    public CompletableFuture<Object> request(Object request) throws RemotingException {
+        return channel.request(request);
+    }
+
+   
+		//开始心跳检测任务
+    private void startHeartBeatTask(URL url) {
+        if (!client.canHandleIdle()) {
+            AbstractTimerTask.ChannelProvider cp = () -> Collections.singletonList(HeaderExchangeClient.this);
+            int heartbeat = getHeartbeat(url);
+            long heartbeatTick = calculateLeastDuration(heartbeat);
+            this.heartBeatTimerTask = new HeartbeatTimerTask(cp, heartbeatTick, heartbeat);
+            IDLE_CHECK_TIMER.newTimeout(heartBeatTimerTask, heartbeatTick, TimeUnit.MILLISECONDS);
+        }
+    }
+
+  	//开始重连任务。
+    private void startReconnectTask(URL url) {
+        if (shouldReconnect(url)) {
+            AbstractTimerTask.ChannelProvider cp = () -> Collections.singletonList(HeaderExchangeClient.this);
+            int idleTimeout = getIdleTimeout(url);
+            long heartbeatTimeoutTick = calculateLeastDuration(idleTimeout);
+            this.reconnectTimerTask = new ReconnectTimerTask(cp, heartbeatTimeoutTick, idleTimeout);
+            IDLE_CHECK_TIMER.newTimeout(reconnectTimerTask, heartbeatTimeoutTick, TimeUnit.MILLISECONDS);
+        }
+    }
+  
+  	//关闭
+  	private void doClose() {
+        if (heartBeatTimerTask != null) {
+            heartBeatTimerTask.cancel();
+        }
+
+        if (reconnectTimerTask != null) {
+            reconnectTimerTask.cancel();
+        }
+    }
+
+    //计算周期。不能小于1s
+    private long calculateLeastDuration(int time) {
+        if (time / HEARTBEAT_CHECK_TICK <= 0) {
+            return LEAST_HEARTBEAT_DURATION;
+        } else {
+            return time / HEARTBEAT_CHECK_TICK;
+        }
+    }
+
+}
+```
+
+##### HeaderExchangeChannel 
+
+> HeaderExchangeClient只负责心跳检测，实际的请求发送交给HeaderExchangeChannel处理。
+>
+> HeaderExchangeChannel负责：
+>
+> - RpcInvocation转Request
+> - 同步转异步，返回创建DefaultFuture
+> - 使用channel【默认NettyClient】发送请求
+
+```java
+final class HeaderExchangeChannel implements ExchangeChannel {
+
+    private static final String CHANNEL_KEY = HeaderExchangeChannel.class.getName() + ".CHANNEL";
+		
+  	//NettyClient
+    private final Channel channel;
+
+    private volatile boolean closed = false;
+
+  	//发送请求-重写超时
+    @Override
+    public CompletableFuture<Object> request(Object request) throws RemotingException {
+        return request(request, channel.getUrl().getPositiveParameter(TIMEOUT_KEY, DEFAULT_TIMEOUT));
+    }
+		//发送请求
+    @Override
+    public CompletableFuture<Object> request(Object request, int timeout) throws RemotingException {
+      	//检查channel是否关闭
+        if (closed) {
+            throw new RemotingException(this.getLocalAddress(), null, "Failed to send request " + request + ", cause: The channel " + this + " is closed!");
+        }
+        //封装请求
+        Request req = new Request();
+        req.setVersion(Version.getProtocolVersion());
+        req.setTwoWay(true);//双向通信 为 true
+        req.setData(request);//data 是整个RpcInvocation
+      	//创建DefaultFuture返回
+        DefaultFuture future = DefaultFuture.newFuture(channel, req, timeout);
+        try {
+            channel.send(req);//调用NettyClient的send发送请求
+        } catch (RemotingException e) {
+            future.cancel();//异常 调用future的取消
+            throw e;
+        }
+        return future;
+    }
+		
+  	//忽略...
+
+}
+```
+
+###### DefaultFuture
+
+> DefaultFuture 继承了java的CompletableFuture
+>
+> 没多少东西
+>
+> - 类上有静态的id->channel的映射集合、id->future的映射集合、超时计时器。
+>
+> - 实例上记录了超时任务，channel，请求信息，开始结束时间。
+
+```java
+public class DefaultFuture extends CompletableFuture<Object> {
+		
+  	//请求id -> channel 映射
+    private static final Map<Long, Channel> CHANNELS = new ConcurrentHashMap<>();
+		//请求id -> DefaultFuture 映射
+    private static final Map<Long, DefaultFuture> FUTURES = new ConcurrentHashMap<>();
+
+    public static final Timer TIME_OUT_TIMER = new HashedWheelTimer(
+            new NamedThreadFactory("dubbo-future-timeout", true),
+            30,
+            TimeUnit.MILLISECONDS);
+
+    // 请求id
+    private final Long id;
+    private final Channel channel;
+    private final Request request;
+    private final int timeout;//超时时间
+    private final long start = System.currentTimeMillis();//开始时间
+    private volatile long sent;//接收到回复的时间
+    private Timeout timeoutCheckTask;
+
+
+    public static DefaultFuture newFuture(Channel channel, Request request, int timeout) {
+        final DefaultFuture future = new DefaultFuture(channel, request, timeout);
+        // timeout check
+        timeoutCheck(future);
+        return future;
+    }
+
+		//收到回复
+    public static void sent(Channel channel, Request request) {
+        DefaultFuture future = FUTURES.get(request.getId());
+        if (future != null) {
+            future.doSent();
+        }
+    }
+
+   	//channel关闭时，需要把所有的channel对应的request对应的Future，置为通道不活跃的错误回复
+    public static void closeChannel(Channel channel) {
+        for (Map.Entry<Long, Channel> entry : CHANNELS.entrySet()) {
+            if (channel.equals(entry.getValue())) {
+                DefaultFuture future = getFuture(entry.getKey());
+                if (future != null && !future.isDone()) {
+                    Response disconnectResponse = new Response(future.getId());
+                    disconnectResponse.setStatus(Response.CHANNEL_INACTIVE);
+                    disconnectResponse.setErrorMessage("Channel " +
+                            channel +
+                            " is inactive. Directly return the unFinished request : " +
+                            future.getRequest());
+                    DefaultFuture.received(channel, disconnectResponse);
+                }
+            }
+        }
+    }
+		
+  	//接收方法 重载
+    public static void received(Channel channel, Response response) {
+        received(channel, response, false);
+    }
+
+  	//接收方法
+    public static void received(Channel channel, Response response, boolean timeout) {
+        try {
+            DefaultFuture future = FUTURES.remove(response.getId());
+            if (future != null) {
+                Timeout t = future.timeoutCheckTask;
+                if (!timeout) {
+                    // decrease Time
+                    t.cancel();
+                }
+                future.doReceived(response);
+            } else {
+                logger.warn("The timeout response finally returned at "
+                        + (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date()))
+                        + ", response " + response
+                        + (channel == null ? "" : ", channel: " + channel.getLocalAddress()
+                        + " -> " + channel.getRemoteAddress()));
+            }
+        } finally {
+            CHANNELS.remove(response.getId());
+        }
+    }
+
+  	//future的取消 
+    @Override
+    public boolean cancel(boolean mayInterruptIfRunning) {
+        Response errorResult = new Response(id);
+        errorResult.setStatus(Response.CLIENT_ERROR);
+        errorResult.setErrorMessage("request future has been canceled.");
+        this.doReceived(errorResult);
+        FUTURES.remove(id);
+        CHANNELS.remove(id);
+        return true;
+    }
+
+
+    private void doReceived(Response res) {
+        if (res == null) {
+            throw new IllegalStateException("response cannot be null");
+        }
+        if (res.getStatus() == Response.OK) {
+            this.complete(res.getResult());
+        } else if (res.getStatus() == Response.CLIENT_TIMEOUT || res.getStatus() == Response.SERVER_TIMEOUT) {
+            this.completeExceptionally(new TimeoutException(res.getStatus() == Response.SERVER_TIMEOUT, channel, res.getErrorMessage()));
+        } else {
+            this.completeExceptionally(new RemotingException(channel, res.getErrorMessage()));
+        }
+    }
+		//future可以get到返回时，记录返回时间
+    private void doSent() {
+        sent = System.currentTimeMillis();
+    }
+		//返回超时信息
+    private String getTimeoutMessage(boolean scan) {
+        long nowTimestamp = System.currentTimeMillis();
+        return (sent > 0 ? "Waiting server-side response timeout" : "Sending request timeout in client-side")
+                + (scan ? " by scan timer" : "") + ". start time: "
+                + (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date(start))) + ", end time: "
+                + (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date())) + ","
+                + (sent > 0 ? " client elapsed: " + (sent - start)
+                + " ms, server elapsed: " + (nowTimestamp - sent)
+                : " elapsed: " + (nowTimestamp - start)) + " ms, timeout: "
+                + timeout + " ms, request: " + (logger.isDebugEnabled() ? request : getRequestWithoutData()) + ", channel: " + channel.getLocalAddress()
+                + " -> " + channel.getRemoteAddress();
+    }
+
+		//超时检测任务 内部类
+    private static class TimeoutCheckTask implements TimerTask {
+
+        private final Long requestID;
+
+        TimeoutCheckTask(Long requestID) {
+            this.requestID = requestID;
+        }
+
+      	//到了超时时间，如果future还没有结束。就封装超时返回
+        public void run(Timeout timeout) {
+            DefaultFuture future = DefaultFuture.getFuture(requestID);
+            if (future == null || future.isDone()) {
+                return;
+            }
+            // create exception response.
+            Response timeoutResponse = new Response(future.getId());
+            // set timeout status.
+            timeoutResponse.setStatus(future.isSent() ? Response.SERVER_TIMEOUT : Response.CLIENT_TIMEOUT);
+            timeoutResponse.setErrorMessage(future.getTimeoutMessage(true));
+            // handle response.
+            DefaultFuture.received(future.getChannel(), timeoutResponse, true);
+
+        }
+    }
+```
+
+##### NettyClient
+
+> dubbo封装的netty4客户端
+>
+> ![image-20200703141638657](https://gitee.com/wangigor/typora-images/raw/master/dubbo-netty-client-hierarchy.png)
+>
+> 
+
+```java
+public abstract class AbstractPeer implements Endpoint, ChannelHandler {
+
+  	//通道事件处理Handler
+    private final ChannelHandler handler;
+		//服务提供者url
+    private volatile URL url;
+		
+  	//调用子类的发送
+    @Override
+    public void send(Object message) throws RemotingException {
+        send(message, url.getParameter(Constants.SENT_KEY, false));
+    }
+  	//忽略...
+}
+```
+
+```java
+public abstract class AbstractClient extends AbstractEndpoint implements Client {
+		
+  	//用于连接用的锁
+    private final Lock connectLock = new ReentrantLock();
+    private final boolean needReconnect;
+  	//这个线程池 除了当前实例的close方法用，其他没地方用。
+    protected volatile ExecutorService executor;
+
+    @Override
+    public void send(Object message, boolean sent) throws RemotingException {
+      	//需要重新连接
+        if (needReconnect && !isConnected()) {
+            connect();
+        }
+      	//获取连接
+        Channel channel = getChannel();
+        
+        if (channel == null || !channel.isConnected()) {
+            throw new RemotingException(this, "message can not send, because channel is closed . url:" + getUrl());
+        }
+      	//用NettyChannel发送
+        channel.send(message, sent);
+    }
+}
+```
+
+###### 获取channel通道
+
+> 使用Netty长连接，只有当前通道关闭，才会重连。
+>
+> 就看getChannel()方法获取连接。
+
+```java
+public class NettyClient extends AbstractClient {
+
+  	//Netty客户端的EventLoopGroup 默认min(核心线程数+1,32)
+    private static final NioEventLoopGroup nioEventLoopGroup = new NioEventLoopGroup(Constants.DEFAULT_IO_THREADS, new DefaultThreadFactory("NettyClientWorker", true));
+
+  	//socks代理相关的属性 从系统变量里获取
+    private static final String SOCKS_PROXY_HOST = "socksProxyHost";
+    private static final String SOCKS_PROXY_PORT = "socksProxyPort";
+    private static final String DEFAULT_SOCKS_PROXY_PORT = "1080";
+
+    private Bootstrap bootstrap;
+
+   	//当前连接的channel
+    private volatile Channel channel;
+
+    //NettyClient构造器 父模板会调用doOpen、doConnent方法
+    public NettyClient(final URL url, final ChannelHandler handler) throws RemotingException {
+    	// the handler will be warped: MultiMessageHandler->HeartbeatHandler->handler
+    	super(url, wrapChannelHandler(url, handler));
+    }
+
+    //初始化Netty的Bootstrap
+    @Override
+    protected void doOpen() throws Throwable {
+        final NettyClientHandler nettyClientHandler = new NettyClientHandler(getUrl(), this);
+        bootstrap = new Bootstrap();
+        bootstrap.group(nioEventLoopGroup)
+                .option(ChannelOption.SO_KEEPALIVE, true)
+                .option(ChannelOption.TCP_NODELAY, true)
+                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                //.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, getTimeout())
+                .channel(NioSocketChannel.class);
+
+        bootstrap.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, Math.max(3000, getConnectTimeout()));
+        bootstrap.handler(new ChannelInitializer() {
+
+            @Override
+            protected void initChannel(Channel ch) throws Exception {
+                int heartbeatInterval = UrlUtils.getHeartbeat(getUrl());
+                NettyCodecAdapter adapter = new NettyCodecAdapter(getCodec(), getUrl(), NettyClient.this);
+                ch.pipeline()//.addLast("logging",new LoggingHandler(LogLevel.INFO))//for debug
+                        .addLast("decoder", adapter.getDecoder())
+                        .addLast("encoder", adapter.getEncoder())
+                        .addLast("client-idle-handler", new IdleStateHandler(heartbeatInterval, 0, 0, MILLISECONDS))
+                        .addLast("handler", nettyClientHandler);
+                String socksProxyHost = ConfigUtils.getProperty(SOCKS_PROXY_HOST);
+                if(socksProxyHost != null) {
+                    int socksProxyPort = Integer.parseInt(ConfigUtils.getProperty(SOCKS_PROXY_PORT, DEFAULT_SOCKS_PROXY_PORT));
+                    Socks5ProxyHandler socks5ProxyHandler = new Socks5ProxyHandler(new InetSocketAddress(socksProxyHost, socksProxyPort));
+                    ch.pipeline().addFirst(socks5ProxyHandler);
+                }
+            }
+        });
+    }
+
+  	//获取nio通道
+    @Override
+    protected void doConnect() throws Throwable {
+        long start = System.currentTimeMillis();
+        ChannelFuture future = bootstrap.connect(getConnectAddress());
+        try {
+            boolean ret = future.awaitUninterruptibly(getConnectTimeout(), MILLISECONDS);
+
+            if (ret && future.isSuccess()) {
+                Channel newChannel = future.channel();
+                try {
+                    // Close old channel
+                    // copy reference
+                    Channel oldChannel = NettyClient.this.channel;
+                    if (oldChannel != null) {
+                        try {
+                            if (logger.isInfoEnabled()) {
+                                logger.info("Close old netty channel " + oldChannel + " on create new netty channel " + newChannel);
+                            }
+                            oldChannel.close();
+                        } finally {
+                            NettyChannel.removeChannelIfDisconnected(oldChannel);
+                        }
+                    }
+                } finally {
+                    if (NettyClient.this.isClosed()) {
+                        try {
+                            if (logger.isInfoEnabled()) {
+                                logger.info("Close new netty channel " + newChannel + ", because the client closed.");
+                            }
+                            newChannel.close();
+                        } finally {
+                            NettyClient.this.channel = null;
+                            NettyChannel.removeChannelIfDisconnected(newChannel);
+                        }
+                    } else {
+                        NettyClient.this.channel = newChannel;
+                    }
+                }
+            } else if (future.cause() != null) {
+                throw new RemotingException(this, "client(url: " + getUrl() + ") failed to connect to server "
+                        + getRemoteAddress() + ", error message is:" + future.cause().getMessage(), future.cause());
+            } else {
+                throw new RemotingException(this, "client(url: " + getUrl() + ") failed to connect to server "
+                        + getRemoteAddress() + " client-side timeout "
+                        + getConnectTimeout() + "ms (elapsed: " + (System.currentTimeMillis() - start) + "ms) from netty client "
+                        + NetUtils.getLocalHost() + " using dubbo version " + Version.getVersion());
+            }
+        } finally {
+            // just add new valid channel to NettyChannel's cache
+            if (!isConnected()) {
+                //future.cancel(true);
+            }
+        }
+    }
+
+    @Override
+    protected void doDisConnect() throws Throwable {
+        try {
+            NettyChannel.removeChannelIfDisconnected(channel);
+        } catch (Throwable t) {
+            logger.warn(t.getMessage());
+        }
+    }
+
+  	//通过NettyChannel.getOrAddChannel获取Dubbo封装的Channel
+    @Override
+    protected org.apache.dubbo.remoting.Channel getChannel() {
+        Channel c = channel;
+        if (c == null || !c.isActive()) {
+            return null;
+        }
+        return NettyChannel.getOrAddChannel(c, getUrl(), this);
+    }
+}
+```
+
+> NettyChannel是dubbo对netty的channel的封装，**装饰器模式**。
+>
+> 在类的静态成员变量里提供了jvm缓存
+>
+> ```java
+> ConcurrentMap<Channel, NettyChannel> CHANNEL_MAP = new ConcurrentHashMap<Channel, NettyChannel>();
+> ```
+>
+> 记录了Netty的Channel 和 dubbo的Channel的对应关系。
+>
+> NettyChannel是对Netty的Channel的装饰器。封装了channel元数据、url、通道事件处理器。
+
+
+
+###### 发送请求
+
+> 之前获取到了NettyChannel。就是通过他进行请求发送。
+
+```java
+//NettyChannel的发送方法
+public void send(Object message, boolean sent) throws RemotingException {
+    // 父类检查通道是否关闭
+    super.send(message, sent);
+
+    boolean success = true;
+    int timeout = 0;
+    try {
+      	//调用Netty的通道发送数据
+        ChannelFuture future = channel.writeAndFlush(message);
+      	
+      	// sent 的值源于 <dubbo:method sent="true/false" /> 中 sent 的配置值，有两种配置值：
+        //   1. true: 等待消息发出，消息发送失败将抛出异常
+        //   2. false: 不等待消息发出，将消息放入 IO 队列，即刻返回
+        // 默认情况下 sent = false；
+        if (sent) {
+            timeout = getUrl().getPositiveParameter(TIMEOUT_KEY, DEFAULT_TIMEOUT);
+            success = future.await(timeout);
+        }
+        Throwable cause = future.cause();
+        if (cause != null) {
+            throw cause;
+        }
+    } catch (Throwable e) {
+        throw new RemotingException(this, "Failed to send message " + message + " to " + getRemoteAddress() + ", cause: " + e.getMessage(), e);
+    }
+    if (!success) {
+        throw new RemotingException(this, "Failed to send message " + message + " to " + getRemoteAddress()
+                + "in timeout(" + timeout + "ms) limit");
+    }
+}
+```
+
+Netty的channel发送稍微提一提。
+
+writeAndFlush会进行pipeline的调用
+
+```java
+ch.pipeline()//.addLast("logging",new LoggingHandler(LogLevel.INFO))//for debug
+                        .addLast("decoder", adapter.getDecoder())
+                        .addLast("encoder", adapter.getEncoder())
+                        .addLast("client-idle-handler", new IdleStateHandler(heartbeatInterval, 0, 0, MILLISECONDS))
+                        .addLast("handler", nettyClientHandler);
+```
+
+
+
+##### NettyServer
+
+> dubbo封装的netty4服务端
+>
+> ![image-20200713100239178](https://gitee.com/wangigor/typora-images/raw/master/dubbo-nettyServer-hierarchy.png)
+
+
+
+```java
+/**
+ * NettyServer.
+ */
+public class NettyServer extends AbstractServer implements Server {
+
+    /**
+     * 工作状态的通道worker channel的缓存
+     * <ip:port, dubbo channel>
+     */
+    private Map<String, Channel> channels;
+    private ServerBootstrap bootstrap;
+    //boss channel 用于接收连接请求。分发到work channel
+		private io.netty.channel.Channel channel;
+
+  	//netty 的boss和worker时间轮询器
+    private EventLoopGroup bossGroup;
+    private EventLoopGroup workerGroup;
+
+    public NettyServer(URL url, ChannelHandler handler) throws RemotingException {
+        // you can customize name and type of client thread pool by THREAD_NAME_KEY and THREADPOOL_KEY in CommonConstants.
+        // the handler will be warped: MultiMessageHandler->HeartbeatHandler->handler
+        super(url, ChannelHandlers.wrap(handler, ExecutorUtil.setThreadName(url, SERVER_THREAD_POOL_NAME)));
+    }
+
+    //初始化Netty的bootstrap并启动
+    @Override
+    protected void doOpen() throws Throwable {
+        bootstrap = new ServerBootstrap();
+
+        bossGroup = new NioEventLoopGroup(1, new DefaultThreadFactory("NettyServerBoss", true));
+        workerGroup = new NioEventLoopGroup(getUrl().getPositiveParameter(IO_THREADS_KEY, Constants.DEFAULT_IO_THREADS),
+                new DefaultThreadFactory("NettyServerWorker", true));
+
+        final NettyServerHandler nettyServerHandler = new NettyServerHandler(getUrl(), this);
+        channels = nettyServerHandler.getChannels();
+
+        bootstrap.group(bossGroup, workerGroup)
+                .channel(NioServerSocketChannel.class)
+                .childOption(ChannelOption.TCP_NODELAY, Boolean.TRUE)
+                .childOption(ChannelOption.SO_REUSEADDR, Boolean.TRUE)
+                .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                .childHandler(new ChannelInitializer<NioSocketChannel>() {
+                    @Override
+                    protected void initChannel(NioSocketChannel ch) throws Exception {
+                        // FIXME: should we use getTimeout()?
+                        int idleTimeout = UrlUtils.getIdleTimeout(getUrl());
+                        NettyCodecAdapter adapter = new NettyCodecAdapter(getCodec(), getUrl(), NettyServer.this);
+                        ch.pipeline()//.addLast("logging",new LoggingHandler(LogLevel.INFO))//for debug
+                                .addLast("decoder", adapter.getDecoder())
+                                .addLast("encoder", adapter.getEncoder())
+                                .addLast("server-idle-handler", new IdleStateHandler(0, 0, idleTimeout, MILLISECONDS))
+                                .addLast("handler", nettyServerHandler);
+                    }
+                });
+        // bind
+        ChannelFuture channelFuture = bootstrap.bind(getBindAddress());
+        channelFuture.syncUninterruptibly();
+        channel = channelFuture.channel();
+
+    }
+//忽略...
+}
+```
+
+> netty接收到请求后，交给nettyServerHandler
+>
+> 调用栈:
+>
+> NettyServerHandler channelRead(ChannelHandlerContext ctx, Object msg)
+>
+> ​	-> AbstractPeer received(Channel ch, Object msg)
+>
+> ​		->MultiMessageHandler received(Channel channel, Object message)
+>
+> ​			->HeartbeatHandler received(Channel channel, Object message)
+>
+> ​				->AllChannelHandler received(Channel channel, Object message)
+>
+> AllChannelHandler是all类型的线程派发器Dispatcher
+
+###### 线程派发器
+
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/dispatcher-location.jpg)
+>
+> Dubbo 将底层通信框架中接收请求的线程称为 IO 线程。如果一些事件处理逻辑可以很快执行完，比如只在内存打一个标记，此时直接在 IO 线程上执行该段逻辑即可。但如果事件的处理逻辑比较耗时，比如该段逻辑会发起数据库查询或者 HTTP 请求。此时我们就不应该让事件处理逻辑在 IO 线程上执行，而是应该派发到线程池中去执行。原因也很简单，IO 线程主要用于接收请求，如果 IO 线程被占满，将导致它不能接收新的请求。
+>
+> | 策略       | 用途                                                         |
+> | ---------- | ------------------------------------------------------------ |
+> | all        | 所有消息都派发到线程池，包括请求，响应，连接事件，断开事件等 |
+> | direct     | 所有消息都不派发到线程池，全部在 IO 线程上直接执行           |
+> | message    | 只有**请求**和**响应**消息派发到线程池，其它消息均在 IO 线程上执行 |
+> | execution  | 只有**请求**消息派发到线程池，不含响应。其它消息均在 IO 线程上执行 |
+> | connection | 在 IO 线程上，将连接断开事件放入队列，有序逐个执行，其它消息派发到线程池 |
+> Dubbo 使用 all 派发策略，即将所有的消息都派发到线程池中。
+
+```java
+@SPI(AllDispatcher.NAME)
+public interface Dispatcher {
+
+    /**
+     * dispatch the message to threadpool.
+     *
+     * @param handler
+     * @param url
+     * @return channel handler
+     */
+    @Adaptive({Constants.DISPATCHER_KEY, "dispather", "channel.handler"})
+    // The last two parameters are reserved for compatibility with the old configuration
+    ChannelHandler dispatch(ChannelHandler handler, URL url);
+
+}
+```
+
+```java
+public class AllChannelHandler extends WrappedChannelHandler {
+
+    public AllChannelHandler(ChannelHandler handler, URL url) {
+        super(handler, url);
+    }
+
+  	//处理连接事件
+    @Override
+    public void connected(Channel channel) throws RemotingException {
+      	//获取线程池
+        ExecutorService executor = getExecutorService();
+        try {
+          	//将连接事件派发到线程池中处理
+            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.CONNECTED));
+        } catch (Throwable t) {
+            throw new ExecutionException("connect event", channel, getClass() + " error when process connected event .", t);
+        }
+    }
+
+  	//处理断开连接事件
+    @Override
+    public void disconnected(Channel channel) throws RemotingException {
+      	//获取连接池
+        ExecutorService executor = getExecutorService();
+        try {
+          	//将断开连接事件派发到线程池中处理
+            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.DISCONNECTED));
+        } catch (Throwable t) {
+            throw new ExecutionException("disconnect event", channel, getClass() + " error when process disconnected event .", t);
+        }
+    }
+
+  	//接收请求和响应信息
+    @Override
+    public void received(Channel channel, Object message) throws RemotingException {
+        ExecutorService executor = getExecutorService();
+        try {
+          	// 将请求和响应消息派发到线程池中处理
+            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.RECEIVED, message));
+        } catch (Throwable t) {
+           	// 如果通信方式为双向通信，此时将 Server side ... threadpool is exhausted 
+            // 错误信息封装到 Response 中，并返回给服务消费方。
+          	if(message instanceof Request && t instanceof RejectedExecutionException){
+              Request request = (Request)message;
+              if(request.isTwoWay()){
+                 String msg = "Server side(" + url.getIp() + "," + url.getPort() + ") threadpool is exhausted ,detail msg:" + t.getMessage();
+                 Response response = new Response(request.getId(), request.getVersion());
+                 response.setStatus(Response.SERVER_THREADPOOL_EXHAUSTED_ERROR);
+                 response.setErrorMessage(msg);
+                 // 返回包含错误信息的 Response 对象
+                 channel.send(response);
+                 return;
+              }
+           }
+            throw new ExecutionException(message, channel, getClass() + " error when process received event .", t);
+        }
+    }
+
+  	//处理异常信息
+    @Override
+    public void caught(Channel channel, Throwable exception) throws RemotingException {
+        ExecutorService executor = getExecutorService();
+        try {
+            executor.execute(new ChannelEventRunnable(channel, handler, ChannelState.CAUGHT, exception));
+        } catch (Throwable t) {
+            throw new ExecutionException("caught event", channel, getClass() + " error when process caught event .", t);
+        }
+    }
+}
+```
+
+请求对象会被封装 ChannelEventRunnable 中，ChannelEventRunnable 将会是服务调用过程的新起点。
+
+###### 调用服务
+
+
+
+> 大多数请求是请求和响应【RECEIVED】,这里把RECEIVED单独拎出来做判断。
+>
+> 因为有5种类型判断，用switch效率更优。switch好比二叉查找树，if判断相当于线性查找。
+
+
+
+```java
+public class ChannelEventRunnable implements Runnable {
+
+  	//通道处理器。这里是DecodeHandler
+    private final ChannelHandler handler;
+    private final Channel channel;
+    private final ChannelState state;
+    private final Throwable exception;
+  	//解码之后就是Request对象
+    private final Object message;
+
+    @Override
+    public void run() {
+        if (state == ChannelState.RECEIVED) {
+            try {
+                handler.received(channel, message);
+            } catch (Exception e) {
+                logger.warn("ChannelEventRunnable handle " + state + " operation error, channel is " + channel
+                        + ", message is " + message, e);
+            }
+        } else {
+            switch (state) {
+            case CONNECTED:
+                //...
+                break;
+            case DISCONNECTED:
+                //...
+                break;
+            case SENT:
+                //...
+                break;
+            case CAUGHT:
+                //...
+                break;
+            default:
+                logger.warn("unknown state: " + state + ", message is " + message);
+            }
+        }
+
+    }
+
+}
+```
+
+ChannelEventRunnable不负责具体的调用逻辑，相当于中转站，把请求交给DecodeHandler继续处理。
+
+```java
+		//DecodeHandler
+		public void received(Channel channel, Object message) throws RemotingException {
+        if (message instanceof Decodeable) {
+            decode(message);
+        }
+
+        if (message instanceof Request) {
+            decode(((Request) message).getData());
+        }
+
+        if (message instanceof Response) {
+            decode(((Response) message).getResult());
+        }
+				//默认的，在IO线程中已经完成了解码操作，继续交由HeaderExchangeHandler处理
+        handler.received(channel, message);
+    }
+```
+
+
+
+```java
+    //HeaderExchangeHandler
+		public void received(Channel channel, Object message) throws RemotingException {
+      	//通道设置心跳的时间戳
+        channel.setAttribute(KEY_READ_TIMESTAMP, System.currentTimeMillis());
+        final ExchangeChannel exchangeChannel = HeaderExchangeChannel.getOrAddChannel(channel);
+        try {
+            if (message instanceof Request) {
+                // Request请求信息
+                Request request = (Request) message;
+                if (request.isEvent()) {
+                    handlerEvent(channel, request);
+                } else {
+                    if (request.isTwoWay()) {
+                      	//双向请求，交由handleRequest方法处理
+                        handleRequest(exchangeChannel, request);
+                    } else {
+                      	//单向请求，向后调用具体服务，不处理结果
+                        handler.received(exchangeChannel, request.getData());
+                    }
+                }
+            // 处理响应对象，服务消费方会执行此处逻辑，后面分析
+            } else if (message instanceof Response) {
+                handleResponse(channel, (Response) message);
+            // 处理telnet请求
+            } else if (message instanceof String) {
+                if (isClientSide(channel)) {
+                    Exception e = new Exception("Dubbo client can not supported string message: " + message + " in channel: " + channel + ", url: " + channel.getUrl());
+                    logger.error(e.getMessage(), e);
+                } else {
+                    String echo = handler.telnet(channel, (String) message);
+                    if (echo != null && echo.length() > 0) {
+                        channel.send(echo);
+                    }
+                }
+            } else {
+                handler.received(exchangeChannel, message);
+            }
+        } finally {
+            HeaderExchangeChannel.removeChannelIfDisconnected(channel);
+        }
+    }
+```
+
+```java
+//HeaderExchangeHandler
+void handleRequest(final ExchangeChannel channel, Request req) throws RemotingException {
+  	//创建Response
+    Response res = new Response(req.getId(), req.getVersion());
+  	//检查请求是否合法，不合法返回BAD_REQUEST
+    if (req.isBroken()) {
+        Object data = req.getData();
+
+        String msg;
+        if (data == null) {
+            msg = null;
+        } else if (data instanceof Throwable) {
+            msg = StringUtils.toString((Throwable) data);
+        } else {
+            msg = data.toString();
+        }
+        res.setErrorMessage("Fail to decode request due to: " + msg);
+        res.setStatus(Response.BAD_REQUEST);
+
+        channel.send(res);
+        return;
+    }
+    // 获取Request的data，也就是RpcInvocation对象
+    Object msg = req.getData();
+    try {
+      	//继续向下调用 DubboProtocol的匿名内部类ExchangeHandlerAdapter
+        CompletionStage<Object> future = handler.reply(channel, msg);
+      	//获取结果
+        future.whenComplete((appResult, t) -> {
+            try {
+                if (t == null) {
+                  	//设置OK状态码
+                    res.setStatus(Response.OK);
+                    res.setResult(appResult);
+                } else {
+                  	//设置服务端异常SERVICE_ERROR
+                    res.setStatus(Response.SERVICE_ERROR);
+                    res.setErrorMessage(StringUtils.toString(t));
+                }
+              
+             		//由通道返回结果
+                channel.send(res);
+            } catch (RemotingException e) {
+                logger.warn("Send result to consumer failed, channel is " + channel + ", msg is " + e);
+            } finally {
+                // HeaderExchangeChannel.removeChannelIfDisconnected(channel);
+            }
+        });
+    } catch (Throwable e) {
+      	//设置服务端异常SERVICE_ERROR
+        res.setStatus(Response.SERVICE_ERROR);
+        res.setErrorMessage(StringUtils.toString(e));
+        channel.send(res);
+    }
+}
+```
+
+
+
+```java
+//DubboProtocol 的匿名内部类
+private ExchangeHandler requestHandler = new ExchangeHandlerAdapter() {
+
+    @Override
+    public CompletableFuture<Object> reply(ExchangeChannel channel, Object message) throws RemotingException {
+
+        Invocation inv = (Invocation) message;
+      	//获取Invoker实例
+        Invoker<?> invoker = getInvoker(channel, inv);
+      	//回调相关 忽略
+        if (Boolean.TRUE.toString().equals(inv.getAttachments().get(IS_CALLBACK_SERVICE_INVOKE))) {
+            //...
+        }
+        RpcContext.getContext().setRemoteAddress(channel.getRemoteAddress());
+      	//通过Invoker调用具体服务
+        Result result = invoker.invoke(inv);
+        return result.completionFuture().thenApply(Function.identity());
+    }
+
+};
+```
+
+
+
+获取Invoker
+
+```java
+    Invoker<?> getInvoker(Channel channel, Invocation inv) throws RemotingException {
+        boolean isCallBackServiceInvoke = false;
+        boolean isStubServiceInvoke = false;
+        int port = channel.getLocalAddress().getPort();
+      	//path 是接口类全限定名 除非回调和存根会去修改。
+        String path = inv.getAttachments().get(PATH_KEY);
+
+        // 本地存根逻辑
+        isStubServiceInvoke = Boolean.TRUE.toString().equals(inv.getAttachments().get(STUB_EVENT_KEY));
+        if (isStubServiceInvoke) {
+            port = channel.getRemoteAddress().getPort();
+        }
+
+        //回调逻辑 
+        isCallBackServiceInvoke = isClientSide(channel) && !isStubServiceInvoke;
+        if (isCallBackServiceInvoke) {
+            path += "." + inv.getAttachments().get(CALLBACK_SERVICE_KEY);
+            inv.getAttachments().put(IS_CALLBACK_SERVICE_INVOKE, Boolean.TRUE.toString());
+        }
+
+      	//计算service key
+      	//格式为 groupName/serviceName:serviceVersion:port
+      	//e,g. org.example.dubbo.api.TestApi:20880
+        String serviceKey = serviceKey(port, path, inv.getAttachments().get(VERSION_KEY), inv.getAttachments().get(GROUP_KEY));
+        
+      	// 从 exporterMap 查找与 serviceKey 相对应的 DubboExporter 对象，
+        // 服务导出过程中会将 <serviceKey, DubboExporter> 映射关系存储到 exporterMap 集合中
+      	DubboExporter<?> exporter = (DubboExporter<?>) exporterMap.get(serviceKey);
+        if (exporter == null) {
+            throw new RemotingException(channel, "Not found exported service: " + serviceKey + " in " + exporterMap.keySet() + ", may be version or group mismatch " +
+                    ", channel: consumer: " + channel.getRemoteAddress() + " --> provider: " + channel.getLocalAddress() + ", message:" + inv);
+        }
+				//返回Invoker对象
+        return exporter.getInvoker();
+    }
+```
+
+invoker执行
+
+> 看一下线程的调用栈
+>
+> ![image-20200713155914794](https://gitee.com/wangigor/typora-images/raw/master/dubbo-received-msg-trace.png)
+>
+> ChannelEventRunnable#run()  
+> ​	-> DecodeHandler#received(Channel, Object)    
+> ​		-> HeaderExchangeHandler#received(Channel, Object)     
+> ​			-> HeaderExchangeHandler#handleRequest(ExchangeChannel, Request)        
+> ​				-> DubboProtocol.requestHandler#reply(ExchangeChannel, Object)          
+> ​					-> Filter#invoke(Invoker, Invocation)            
+> ​						-> AbstractProxyInvoker#invoke(Invocation)              
+> ​							-> Wrapper0#invokeMethod(Object, String, Class[], Object[])
+>
+> 就到了provider的业务代码。
+
+在AbstractProxyInvoker调用时，异步调用，获取结果组装成同步RpcResult
+
+```java
+    public Result invoke(Invocation invocation) throws RpcException {
+        try {
+          	//向下调用服务
+            Object value = doInvoke(proxy, invocation.getMethodName(), invocation.getParameterTypes(), invocation.getArguments());
+          	CompletableFuture<Object> future = wrapWithFuture(value, invocation);
+          	//组装同步调用结果并返回
+            AsyncRpcResult asyncRpcResult = new AsyncRpcResult(invocation);
+            future.whenComplete((obj, t) -> {
+                AppResponse result = new AppResponse();
+                if (t != null) {
+                    if (t instanceof CompletionException) {
+                        result.setException(t.getCause());
+                    } else {
+                        result.setException(t);
+                    }
+                } else {
+                    result.setValue(obj);
+                }
+                asyncRpcResult.complete(result);
+            });
+            return asyncRpcResult;
+        } catch (InvocationTargetException e) {
+            if (RpcContext.getContext().isAsyncStarted() && !RpcContext.getContext().stopAsync()) {
+                logger.error("Provider async started, but got an exception from the original method, cannot write the exception back to consumer because an async result may have returned the new thread.", e);
+            }
+            return AsyncRpcResult.newDefaultAsyncResult(null, e.getTargetException(), invocation);
+        } catch (Throwable e) {
+            throw new RpcException("Failed to invoke remote proxy method " + invocation.getMethodName() + " to " + getUrl() + ", cause: " + e.getMessage(), e);
+        }
+    }
+```
+
+Invoker实例是通过**JavassistProxyFactory**创建的代理。
+
+```java
+public class JavassistProxyFactory extends AbstractProxyFactory {
+
+    @Override
+    public <T> Invoker<T> getInvoker(T proxy, Class<T> type, URL url) {
+        // TODO Wrapper cannot handle this scenario correctly: the classname contains '$'
+        final Wrapper wrapper = Wrapper.getWrapper(proxy.getClass().getName().indexOf('$') < 0 ? proxy.getClass() : type);
+        // 创建匿名类对象
+      	return new AbstractProxyInvoker<T>(proxy, type, url) {
+            @Override
+            protected Object doInvoke(T proxy, String methodName,
+                                      Class<?>[] parameterTypes,
+                                      Object[] arguments) throws Throwable {
+              	// 调用 invokeMethod 方法进行后续的调用
+                return wrapper.invokeMethod(proxy, methodName, parameterTypes, arguments);
+            }
+        };
+    }
+
+}
+```
+
+Wrapper 是一个抽象类，其中 invokeMethod 是一个抽象方法。Dubbo 会在运行时通过 Javassist 框架为 Wrapper 生成实现类，并实现 invokeMethod 方法，该方法最终会根据调用信息调用具体的服务。以 TestService为例，Javassist 为其生成的代理类如下。
+
+> 可以使用arthas的jad查看TestService的Wrapper1包装类。
+
+```java
+/*
+ * Decompiled with CFR.
+ *
+ * Could not load the following classes:
+ *  org.example.dubbo.DTO.TestDTO
+ *  org.example.dubbo.provider.service.TestService
+ */
+package org.apache.dubbo.common.bytecode;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.Map;
+import org.apache.dubbo.common.bytecode.ClassGenerator;
+import org.apache.dubbo.common.bytecode.NoSuchMethodException;
+import org.apache.dubbo.common.bytecode.NoSuchPropertyException;
+import org.apache.dubbo.common.bytecode.Wrapper;
+import org.example.dubbo.DTO.TestDTO;
+import org.example.dubbo.provider.service.TestService;
+
+public class Wrapper1 extends Wrapper implements ClassGenerator.DC {
+    public static String[] pns;
+    public static Map pts;
+    public static String[] mns;
+    public static String[] dmns;
+    public static Class[] mts0;
+
+		//忽略其他代码
+  
+  	//方法调用
+    public Object invokeMethod(Object object, String string, Class[] arrclass, Object[] arrobject) throws InvocationTargetException {
+        TestService testService;
+        try {
+            testService = (TestService)object;
+        }
+        catch (Throwable throwable) {
+            throw new IllegalArgumentException(throwable);
+        }
+        try {
+            if ("test".equals(string) && arrclass.length == 1) {
+                return testService.test((TestDTO)arrobject[0]);
+            }
+        }
+        catch (Throwable throwable) {
+            throw new InvocationTargetException(throwable);
+        }
+        throw new NoSuchMethodException(new StringBuffer().append("Not found method \"").append(string).append("\" in class org.example.dubbo.provider.service.TestService.").toString());
+    }
+}
+```
+
+Response返回跟Request差不多。就不看了。
+
+下面处理最后一个问题，向调用方的用户线程通知结果。
+
+###### 向consumer的用户调用线程通知结果
+
+> 响应数据解码完成后，Dubbo 会将响应对象派发到线程池上。要注意的是，线程池中的线程并非用户的调用线程，所以要想办法将响应对象从线程池线程传递到用户线程上。前面分析过用户线程在发送完请求后的动作，即调用 DefaultFuture 的 get 方法等待响应对象的到来。当响应对象到来后，用户线程会被唤醒，并通过**调用编号**获取属于自己的响应对象。
+
+```java
+    //HeaderExchangeHandler
+		//接收响应 
+		static void handleResponse(Channel channel, Response response) throws RemotingException {
+        if (response != null && !response.isHeartbeat()) {
+            DefaultFuture.received(channel, response);
+        }
+    }
+```
+
+通过请求id，获取调用方用户线程等待的future
+
+```java
+public static void received(Channel channel, Response response, boolean timeout) {
+    try {
+      	//通过请求id获取future
+        DefaultFuture future = FUTURES.remove(response.getId());
+        if (future != null) {
+            Timeout t = future.timeoutCheckTask;
+            if (!timeout) {
+                // 如果调用方已经超时了。就丢弃Response
+                t.cancel();
+            }
+            future.doReceived(response);
+        } else {
+            logger.warn("The timeout response finally returned at "
+                    + (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new Date()))
+                    + ", response " + response
+                    + (channel == null ? "" : ", channel: " + channel.getLocalAddress()
+                    + " -> " + channel.getRemoteAddress()));
+        }
+    } finally {
+        CHANNELS.remove(response.getId());
+    }
+}
+```
+
+```java
+    private void doReceived(Response res) {
+        if (res == null) {
+            throw new IllegalStateException("response cannot be null");
+        }
+        if (res.getStatus() == Response.OK) {
+          	//设置OK的请求结果
+            this.complete(res.getResult());
+          
+        //处理异常
+        } else if (res.getStatus() == Response.CLIENT_TIMEOUT || res.getStatus() == Response.SERVER_TIMEOUT) {
+            this.completeExceptionally(new TimeoutException(res.getStatus() == Response.SERVER_TIMEOUT, channel, res.getErrorMessage()));
+        } else {
+            this.completeExceptionally(new RemotingException(channel, res.getErrorMessage()));
+        }
+    }
+```
+
+以上逻辑是将响应对象保存到相应的 DefaultFuture 实例中，然后再唤醒用户线程，随后用户线程即可从 DefaultFuture 实例中获取到相应结果。
+
+一般情况下，服务消费方会并发调用多个服务，每个用户线程发送请求后，会调用不同 DefaultFuture 对象的 get 方法进行等待。 一段时间后，服务消费方的线程池会收到多个响应对象。这个时候要考虑一个问题，如何将每个响应对象传递给相应的 DefaultFuture 对象，且不出错。答案是通过调用编号。DefaultFuture 被创建时，会要求传入一个 Request 对象。此时 DefaultFuture 可从 Request 对象中获取调用编号，并将 <调用编号, DefaultFuture 对象> 映射关系存入到静态 Map 中，即 FUTURES。线程池中的线程在收到 Response 对象后，会根据 Response 对象中的调用编号到 FUTURES 集合中取出相应的 DefaultFuture 对象，然后再将 Response 对象设置到 DefaultFuture 对象中。最后再唤醒用户线程，这样用户线程即可从 DefaultFuture 对象中获取调用结果了。
+
+![img](https://gitee.com/wangigor/typora-images/raw/master/request-id-application.jpg)
+
+#### 请求编码
+
+下图是Dubbo官网提供的数据包结构。
+
+![img](https://gitee.com/wangigor/typora-images/raw/master/dubbo-data-format.jpg)
+
+请求头供128个bit
+
+| 偏移量(Bit) | 字段         | 取值                                                         |
+| ----------- | ------------ | ------------------------------------------------------------ |
+| 0 ~ 7       | 魔数高位     | 0xda00                                                       |
+| 8 ~ 15      | 魔数低位     | 0xbb                                                         |
+| 16          | 数据包类型   | 0 - Response, 1 - Request                                    |
+| 17          | 调用方式     | 仅在第16位被设为1的情况下有效<br />0 - 单向调用，1 - 双向调用 |
+| 18          | 事件标识     | 0 - 当前数据包是请求或响应包，<br />1 - 当前数据包是心跳包   |
+| 19 ~ 23     | 序列化器编号 | 2 - Hessian2Serialization <br />3 - JavaSerialization <br />4 - CompactedJavaSerialization <br />6 - FastJsonSerialization <br />7 - NativeJavaSerialization <br />8 - KryoSerialization <br />9 - FstSerialization |
+| 24 ~ 31     | 状态         | 20 - OK <br />30 - CLIENT_TIMEOUT <br />31 - SERVER_TIMEOUT <br />40 - BAD_REQUEST <br />50 - BAD_RESPONSE ...... |
+| 32 ~ 95     | 请求编号     | 共8字节，运行时生成                                          |
+| 96 ~ 127    | 消息体长度   | 运行时计算                                                   |
+
+> 从NettyClient/NettyServer的NettyBootstrap初始化方法，开始看。
+>
+> ```java
+> NettyCodecAdapter adapter = new NettyCodecAdapter(getCodec(), getUrl(), NettyClient.this);
+> ch.pipeline()
+> .addLast("decoder", adapter.getDecoder())
+> .addLast("encoder", adapter.getEncoder())
+> ```
+> NettyCodecAdapter是对编码解码器的统一封装。
+>
+> ```java
+> final public class NettyCodecAdapter {
+> 		
+>   	//内部编码器 调用codec进行编码 把netty的ByteBuf转为ChannelBuffer
+>     private final ChannelHandler encoder = new InternalEncoder();
+> 		//内部解码器 调用codec进行解码 把netty的ByteBuf转为ChannelBuffer
+>     private final ChannelHandler decoder = new InternalDecoder();
+> 
+>     private final Codec2 codec;//编码解码器
+> 
+>     private final URL url;
+> 
+>     private final org.apache.dubbo.remoting.ChannelHandler handler;
+>   	//其他忽略...
+> }
+> ```
+>
+> getCodec()是获取url指定的编码解码器，默认为telnet，dubbo协议默认使用dubbo。通过dubbo spi获得。
+>
+> ```java
+> protected static Codec2 getChannelCodec(URL url) {
+> 	String codecName = url.getParameter(Constants.CODEC_KEY, "telnet");
+> 	if (ExtensionLoader.getExtensionLoader(Codec2.class).hasExtension(codecName)) {
+>   	return ExtensionLoader.getExtensionLoader(Codec2.class).getExtension(codecName);
+> 	} else {
+>   	return new CodecAdapter(ExtensionLoader.getExtensionLoader(Codec.class)
+>           .getExtension(codecName));
+> 	}
+> }
+> ```
+> ```properties
+> dubbo=org.apache.dubbo.rpc.protocol.dubbo.DubboCountCodec
+> ```
+> DubboCountCodec封装了对解码的半包请求处理。编码没做操作。内部是用成员的DubboCodec进行编码解码。
+>
+> ![image-20200709152306123](https://gitee.com/wangigor/typora-images/raw/master/DubboCodec-hirarchy.png)
+
+##### 请求编码
+
+> DubboCodec父类ExchangeCodec提供了encode的入口。
+
+```java
+//ExchangeCodec
+public void encode(Channel channel, ChannelBuffer buffer, Object msg) throws IOException {
+    if (msg instanceof Request) {
+      	//对Request编码
+        encodeRequest(channel, buffer, (Request) msg);
+    } else if (msg instanceof Response) {
+      	//对Response编码
+        encodeResponse(channel, buffer, (Response) msg);
+    } else {
+        super.encode(channel, buffer, msg);
+    }
+}
+```
+
+
+
+```java
+//ExchangeCodec
+protected void encodeRequest(Channel channel, ChannelBuffer buffer, Request req) throws IOException {
+  	//获取url的序列化方式，默认为hessian2
+    Serialization serialization = getSerialization(channel);
+    // 数据头 16 byte
+    byte[] header = new byte[HEADER_LENGTH];
+    // 设置魔数 (short) 0xdabb 分成两个byte，分别写。
+    Bytes.short2bytes(MAGIC, header);
+
+    // 第三个 byte 先写入第一个bit 1【请求】和后五bit【序列化方式编号】
+    header[2] = (byte) (FLAG_REQUEST | serialization.getContentTypeId());
+
+  	//设置第三个byte 的第二位，是否为双向通信
+    if (req.isTwoWay()) {
+        header[2] |= FLAG_TWOWAY;
+    }
+  	//设置第三个byte 的第三位 事件标识
+    if (req.isEvent()) {
+        header[2] |= FLAG_EVENT;
+    }
+
+    // 设置请求id，从第四个byte开始设置，共占8个byte
+    Bytes.long2bytes(req.getId(), header, 4);
+
+    // 获取buffer的当前写入位置 pos=0
+    int savedWriteIndex = buffer.writerIndex();
+  	//buffer预留的请求头16字节位置
+    buffer.writerIndex(savedWriteIndex + HEADER_LENGTH);
+  	//ChannelBufferOutputStream是对ChannelBuffer的write的封装
+    ChannelBufferOutputStream bos = new ChannelBufferOutputStream(buffer);
+  	//创建返回带序列化器Hessian2ObjectOutput的对象输出
+    ObjectOutput out = serialization.serialize(channel.getUrl(), bos);
+  	
+    if (req.isEvent()) {
+      	//对事件数据进行序列化操作
+        encodeEventData(channel, out, req.getData());
+    } else {
+      	//对请求数据进行序列化操作
+        encodeRequestData(channel, out, req.getData(), req.getVersion());
+    }
+    out.flushBuffer();
+    if (out instanceof Cleanable) {
+        ((Cleanable) out).cleanup();
+    }
+    bos.flush();
+    bos.close();
+  	//获取报文体长度
+    int len = bos.writtenBytes();
+    checkPayload(channel, len);
+  	//报文体长度写入header中 从第12个byte开始写 共占用4个byte
+    Bytes.int2bytes(len, header, 12);
+
+    // 设置header的写入位置
+    buffer.writerIndex(savedWriteIndex);
+  	// 写入header
+    buffer.writeBytes(header); 
+  	// 设置当前写入位置为 savedWriteIndex + HEADER_LENGTH + len
+    buffer.writerIndex(savedWriteIndex + HEADER_LENGTH + len);
+}
+```
+
+DubboCodec重写了encodeRequestData方法，调用它写入请求体。
+
+```java
+    @Override
+    protected void encodeRequestData(Channel channel, ObjectOutput out, Object data, String version) throws IOException {
+        RpcInvocation inv = (RpcInvocation) data;
+				//序列化Dubbo version、接口全限定名、接口版本
+        out.writeUTF(version);
+        out.writeUTF(inv.getAttachment(PATH_KEY));
+        out.writeUTF(inv.getAttachment(VERSION_KEY));
+				//序列化方法名
+        out.writeUTF(inv.getMethodName());
+      	//设置方法的参数类型 Class->String
+        out.writeUTF(ReflectUtils.getDesc(inv.getParameterTypes()));
+      	//对方法入参进行运行时解析。然后再序列化
+        Object[] args = inv.getArguments();
+        if (args != null) {
+            for (int i = 0; i < args.length; i++) {
+                out.writeObject(encodeInvocationArgument(channel, inv, i));
+            }
+        }
+      	//设置Attachments附属属性
+        out.writeObject(inv.getAttachments());
+    }
+```
+
+到此。对请求编码就完成了。
+
+##### 请求解码
+
+> 请求解码也是从父类ExchangeCodec开始。
+
+```java
+    //ExchangeCodec
+		@Override
+    public Object decode(Channel channel, ChannelBuffer buffer) throws IOException {
+      	//读取buffer中可读数据的总长度
+        int readable = buffer.readableBytes();
+      	//创建请求头header的byte数组
+        byte[] header = new byte[Math.min(readable, HEADER_LENGTH)];
+      	//读取请求头数据
+        buffer.readBytes(header);
+      	//调用重载方法进行后续解码操作
+        return decode(channel, buffer, readable, header);
+    }
+
+    @Override
+    protected Object decode(Channel channel, ChannelBuffer buffer, int readable, byte[] header) throws IOException {
+        // 检查魔数
+        if (readable > 0 && header[0] != MAGIC_HIGH
+                || readable > 1 && header[1] != MAGIC_LOW) {
+            int length = header.length;
+            if (header.length < readable) {
+                header = Bytes.copyOf(header, readable);
+                buffer.readBytes(header, length, readable - length);
+            }
+            for (int i = 1; i < header.length - 1; i++) {
+                if (header[i] == MAGIC_HIGH && header[i + 1] == MAGIC_LOW) {
+                    buffer.readerIndex(buffer.readerIndex() - header.length + i);
+                    header = Bytes.copyOf(header, i);
+                    break;
+                }
+            }
+          	// 通过 telnet 命令行发送的数据包不包含消息头，所以这里
+            // 调用 TelnetCodec 的 decode 方法对数据包进行解码
+            return super.decode(channel, buffer, readable, header);
+        }
+        // 如果可读数据长度小于header定长16.直接返回NEED_MORE_INPUT
+        if (readable < HEADER_LENGTH) {
+            return DecodeResult.NEED_MORE_INPUT;
+        }
+
+        // 获取header中记录的请求体数据长度
+        int len = Bytes.bytes2int(header, 12);
+        checkPayload(channel, len);
+				
+      	//如果可读数据长度小于header长度+请求体数据长度。直接返回NEED_MORE_INPUT
+        int tt = len + HEADER_LENGTH;
+        if (readable < tt) {
+            return DecodeResult.NEED_MORE_INPUT;
+        }
+
+        // limit input stream.
+        ChannelBufferInputStream is = new ChannelBufferInputStream(buffer, len);
+
+        try {
+          	//解析请求体
+            return decodeBody(channel, is, header);
+        } finally {
+            if (is.available() > 0) {
+                try {
+                    if (logger.isWarnEnabled()) {
+                        logger.warn("Skip input stream " + is.available());
+                    }
+                    StreamUtils.skipUnusedStream(is);
+                } catch (IOException e) {
+                    logger.warn(e.getMessage(), e);
+                }
+            }
+        }
+    }
+```
+
+DubboCodec重写了decodeBody
+
+```java
+    //DubboCodec
+		@Override
+    protected Object decodeBody(Channel channel, InputStream is, byte[] header) throws IOException {
+      	//获取请求头的第三个byte 通过逻辑与得出序列化编号
+        byte flag = header[2], proto = (byte) (flag & SERIALIZATION_MASK);
+        // 从第四个byte开始，读取一个long的请求id
+        long id = Bytes.bytes2long(header, 4);
+      	//逻辑与计算是否请求
+        if ((flag & FLAG_REQUEST) == 0) {
+            // 解码响应response
+            Response res = new Response(id);
+            if ((flag & FLAG_EVENT) != 0) {
+                res.setEvent(true);
+            }
+            // 获取响应状态码
+            byte status = header[3];
+            res.setStatus(status);
+            try {
+                if (status == Response.OK) {
+                    Object data;
+                    if (res.isHeartbeat()) {
+                        ObjectInput in = CodecSupport.deserialize(channel.getUrl(), is, proto);
+                        data = decodeHeartbeatData(channel, in);
+                    } else if (res.isEvent()) {
+                        ObjectInput in = CodecSupport.deserialize(channel.getUrl(), is, proto);
+                        data = decodeEventData(channel, in);
+                    } else {
+                        DecodeableRpcResult result;
+                        if (channel.getUrl().getParameter(DECODE_IN_IO_THREAD_KEY, DEFAULT_DECODE_IN_IO_THREAD)) {
+                            result = new DecodeableRpcResult(channel, res, is,
+                                    (Invocation) getRequestData(id), proto);
+                            result.decode();
+                        } else {
+                            result = new DecodeableRpcResult(channel, res,
+                                    new UnsafeByteArrayInputStream(readMessageData(is)),
+                                    (Invocation) getRequestData(id), proto);
+                        }
+                        data = result;
+                    }
+                    res.setResult(data);
+                } else {
+                    ObjectInput in = CodecSupport.deserialize(channel.getUrl(), is, proto);
+                    res.setErrorMessage(in.readUTF());
+                }
+            } catch (Throwable t) {
+                if (log.isWarnEnabled()) {
+                    log.warn("Decode response failed: " + t.getMessage(), t);
+                }
+                res.setStatus(Response.CLIENT_ERROR);
+                res.setErrorMessage(StringUtils.toString(t));
+            }
+            return res;
+        } else {
+            // 解码请求
+            Request req = new Request(id);
+          	// 设置dubbo version
+            req.setVersion(Version.getProtocolVersion());
+          	// 设置双向通信标识
+            req.setTwoWay((flag & FLAG_TWOWAY) != 0);
+          	// 设置是否为事件
+            if ((flag & FLAG_EVENT) != 0) {
+                req.setEvent(true);
+            }
+            try {
+                Object data;
+              	//处理心跳请求。
+                if (req.isHeartbeat()) {
+                    ObjectInput in = CodecSupport.deserialize(channel.getUrl(), is, proto);
+                    data = decodeHeartbeatData(channel, in);
+                //处理事件请求。
+                } else if (req.isEvent()) {
+                    ObjectInput in = CodecSupport.deserialize(channel.getUrl(), is, proto);
+                    data = decodeEventData(channel, in);
+                } else {
+                //处理正常请求。
+                    DecodeableRpcInvocation inv;
+                  	//根据url参数判断是否在当前IO线程 对消息体解码
+                    if (channel.getUrl().getParameter(DECODE_IN_IO_THREAD_KEY, DEFAULT_DECODE_IN_IO_THREAD)) {
+                        //默认true
+                      	inv = new DecodeableRpcInvocation(channel, req, is, proto);
+                      	// 在当前线程，也就是 IO 线程上进行后续的解码工作。此工作完成后，可将
+                        // 调用方法名、attachment、以及调用参数解析出来
+                        inv.decode();
+                    } else {
+                      	// 仅创建 DecodeableRpcInvocation 对象，但不在当前线程上执行解码逻辑
+                        inv = new DecodeableRpcInvocation(channel, req,
+                                new UnsafeByteArrayInputStream(readMessageData(is)), proto);
+                    }
+                    data = inv;
+                }
+              	// 设置 data 到 Request 对象中
+                req.setData(data);
+            } catch (Throwable t) {
+                if (log.isWarnEnabled()) {
+                    log.warn("Decode request failed: " + t.getMessage(), t);
+                }
+                // 若解码过程中出现异常，则将 broken 字段设为 true，
+                // 并将异常对象设置到 Reqeust 对象中
+                req.setBroken(true);
+                req.setData(t);
+            }
+
+            return req;
+        }
+    }
+```
+
+把请求体数据封装成**DecodeableRpcInvocation**。进行解码。
+
+> 解码就是DecodeableRpcInvocation组装父类RpcInvocation的过程
+
+```JAVA
+public class DecodeableRpcInvocation extends RpcInvocation implements Codec, Decodeable {
+
+    private static final Logger log = LoggerFactory.getLogger(DecodeableRpcInvocation.class);
+
+    private Channel channel;
+
+    private byte serializationType;
+
+    private InputStream inputStream;
+
+    private Request request;
+		
+  	//是否已解码标识
+    private volatile boolean hasDecoded;
+
+
+  	//解码入口
+    @Override
+    public void decode() throws Exception {
+      	//容错。防止重复解码。
+        if (!hasDecoded && channel != null && inputStream != null) {
+            try {
+              	//如果没有解码。就在这里调用重载方法解码
+                decode(channel, inputStream);
+            } catch (Throwable e) {
+                if (log.isWarnEnabled()) {
+                    log.warn("Decode rpc invocation failed: " + e.getMessage(), e);
+                }
+              	//解码异常。封装异常
+                request.setBroken(true);
+                request.setData(e);
+            } finally {
+              	//标记为解码完成
+                hasDecoded = true;
+            }
+        }
+    }
+		
+  	//解码
+    @Override
+    public Object decode(Channel channel, InputStream input) throws IOException {
+      	//设置反序列化器
+        ObjectInput in = CodecSupport.getSerialization(channel.getUrl(), serializationType)
+                .deserialize(channel.getUrl(), input);
+
+      	//读取dubbo version
+        String dubboVersion = in.readUTF();
+      	//dubbo version 设置到request中
+        request.setVersion(dubboVersion);
+      	//dubbo version、接口全限定名、接口版本设置到attachments【附件属性】中
+        setAttachment(DUBBO_VERSION_KEY, dubboVersion);
+        setAttachment(PATH_KEY, in.readUTF());
+        setAttachment(VERSION_KEY, in.readUTF());
+				//设置方法名
+        setMethodName(in.readUTF());
+        try {
+            Object[] args;
+            Class<?>[] pts;
+            String desc = in.readUTF();
+          	//设置参数类型集合
+            if (desc.length() == 0) {
+              	//空参。设置参数类型集合和参数集合 空集合
+                pts = DubboCodec.EMPTY_CLASS_ARRAY;
+                args = DubboCodec.EMPTY_OBJECT_ARRAY;
+            } else {
+              	//将desc解析为参数类型集合
+                pts = ReflectUtils.desc2classArray(desc);
+                args = new Object[pts.length];
+              	//循环获取参数，绑定参数
+                for (int i = 0; i < args.length; i++) {
+                    try {
+                        args[i] = in.readObject(pts[i]);
+                    } catch (Exception e) {
+                        if (log.isWarnEnabled()) {
+                            log.warn("Decode argument failed: " + e.getMessage(), e);
+                        }
+                    }
+                }
+            }
+          	//设置参数类型集合
+            setParameterTypes(pts);
+
+          	//设置附件参数列表。
+            Map<String, String> map = (Map<String, String>) in.readObject(Map.class);
+            if (map != null && map.size() > 0) {
+                Map<String, String> attachment = getAttachments();
+                if (attachment == null) {
+                    attachment = new HashMap<String, String>();
+                }
+                attachment.putAll(map);
+                setAttachments(attachment);
+            }
+          
+            //对callback的参数进行处理 TODO
+            for (int i = 0; i < args.length; i++) {
+                args[i] = decodeInvocationArgument(channel, this, pts, i, args[i]);
+            }
+						
+          	//设置参数
+            setArguments(args);
+
+        } catch (ClassNotFoundException e) {
+            throw new IOException(StringUtils.toString("Read invocation data failed.", e));
+        } finally {
+            if (in instanceof Cleanable) {
+                ((Cleanable) in).cleanup();
+            }
+        }
+        return this;
+    }
+
+}
+```
 
 
 
@@ -4057,6 +6019,14 @@ todo
 todo
 
 # token
+
+todo
+
+
+
+# 参数回调
+
+todo
 
 
 
