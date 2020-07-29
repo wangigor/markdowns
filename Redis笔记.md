@@ -10,6 +10,8 @@
 > ⑤有序集合（sorted sets）
 > 与范围查询， bitmaps， hyperloglogs 和 地理空间（geospatial） 索引半径查询。 Redis 内置了 复制（replication），LUA脚本（Lua scripting）， LRU驱动事件（LRU eviction），事务（transactions） 和不同级别的 磁盘持久化（persistence）， 并通过 Redis哨兵（Sentinel）和自动 分区（Cluster）提供高可用性（high availability）。
 
+***
+
 ## redis的key
 
 > Redis 的 key 是字符串类型，但是 key 中不能包括边界字符 ，由于 key 不是 binary safe 的字符串，所以像"my key"和"mykey\n"这样包含空格和换行的 key 是不允许的。
@@ -32,6 +34,8 @@
 | dbsize                   | 查看当前数据库的key的数量                                    |
 | flushdb                  | 清空当前库(**慎用！**）当前集群节点                          |
 | flushall                 | 清空全部库（**删库跑路！！！**）当前集群节点                 |
+
+***
 
 ## 五大数据类型
 
@@ -410,41 +414,1431 @@ Set的实现参考hash的底层实现，Set就是Value都为空的Hash。
 | **zlexcount** key preValue postValue                         | 计算有序集合中指定字典区间内成员数量<br />**-+表示最小值和最大值，如果我们需要通过元素查找的话需要加[** |
 | **zrangebylex** key preValue postValue                       | 获取指定区间的元素，分数必须相同<br />**-+表示最小值和最大值，如果我们需要通过元素查找的话需要加[** |
 
-
+***
 
 ## 持久化
 
-## 主从复制和集群
+> redis是一个内存数据库，数据保存在内存中，但是我们都知道内存的数据变化是很快的，也容易发生丢失。幸好Redis还为我们提供了持久化的机制，分别是**RDB**(Redis DataBase)和**AOF**(Append Only File)。
 
-## 哨兵机制
+### RDB
+
+> RDB是一种**快照存储**持久化方式，具体就是**将Redis某一时刻的内存数据保存到硬盘的文件当中**，默认保存的文件名为dump.rdb，而在Redis服务器启动时，会重新加载dump.rdb文件的数据到内存当中恢复数据。
+
+#### RDB快照生成方式
+
+> 可以通过五种方式触发RDB快照生成。
+>
+> - **客户端save命令**
+>
+> save命令是个**阻塞命令**。当服务器接收到save命令时，开始「拍摄」快照，在此期间不处理其他请求，其他请求将会被挂起直到备份结束。
+>
+> ![image-20200721151325113](https://gitee.com/wangigor/typora-images/raw/master/redis-save-rm.png)
+>
+> ![image-20200721151425000](https://gitee.com/wangigor/typora-images/raw/master/redis-save.png)
+>
+> ![image-20200721151452070](https://gitee.com/wangigor/typora-images/raw/master/redis-save-after-dump.png)
+>
+> > 先删除dump.rdb文件。
+> >
+> > 客户端发送save请求。
+> >
+> > 返回OK后，dump.rdb生成。
+>
+> - **客户端bgsave命令**
+>
+> bgsave命令也是「拍摄」快照。**非阻塞命令**，而是fork一个子线程，子线程进行备份操作，父线程继续处理客户端请求。
+>
+> ![image-20200721151834899](https://gitee.com/wangigor/typora-images/raw/master/redis-bgsave.png)
+>
+> - **服务器配置文件**
+>
+> ```properties
+> save 900 1   #900秒内至少有1个key被更改就执行快照
+> save 300 10  #300内描述至少有10个key被更改就执行快照
+> save 60 10000  #60秒内至少有10000个key被更改就执行快照
+> ```
+>
+> - **shutdown命令**
+>
+> 手动shutdown命令是，服务器会自动发送一条save命令来完成快照，并在完成备份后关闭服务。
+>
+> - **sync命令**
+>
+> 主从环境中，进行主从复制操作：
+>
+> ①**从节点**向主节点发送**sync命令**。
+>
+> ②**主节点**执行**bgsave命令**，fork一个新线程完成快照。
+>
+> ③主节点将dump文件发送至从节点。
+>
+> ④从节点完成数据同步。
+
+#### RDB快照文件
+
+> 快照文件的生成过程是，生成临时文件 -> 写入数据 -> 临时文件替换正式文件。
+>
+> 默认文件名是dump.rdb，可以通过配置文件修改。
+
+| 参数                        | 默认值   | 说明                           |
+| --------------------------- | -------- | ------------------------------ |
+| stop-writes-on-bgsave-error | yes      | 拍摄快照失败是否继续执行写命令 |
+| rdbcompression              | yes      | 是否对快照文件进行压缩         |
+| rdbchecksum                 | yes      | 是否数据校验                   |
+| dbfilename                  | dump.rdb | 快照文件存储的名称             |
+| dir                         | ./       | 快照文件存储的位置             |
+
+#### 禁用快照持久化
+
+- 在redis.conf配置文件中注释掉所有的save配置
+- 追加 save "" 配置。
+
+#### 优缺点
+
+##### 优点
+
+- RDB是一个**非常紧凑的文件**,**它保存了某个时间点得数据集,非常适用于数据集的备份**,比如你可以在每个小时报保存一下过去24小时内的数据,同时每天保存过去30天的数据,这样即使出了问题你也可以根据需求恢复到不同版本的数据集.
+- RDB是一个紧凑的**单一文件**,很**方便传送**到另一个远端数据中心或者亚马逊的S3（可能加密），非常**适用于灾难恢复**.
+- RDB在保存RDB文件时父进程唯一需要做的就是**fork出一个子进程**,接下来的工作全部由子进程来做，父进程不需要再做其他IO操作，所以RDB持久化方式可以最大化redis的性能.
+- **与AOF相比,在恢复大的数据集的时候，RDB方式会更快一些**.
+
+##### 缺点
+
+- 如果服务器宕机，依然会有某个时间段内数据丢失。
+- save命令会造成服务阻塞。
+- bgsave命令即便使用fork子线程进行备份，当数据集较大时，fork过程耗时，可能会导致redis在毫秒级不能响应的请求。
+
+### AOF
+
+> RDB快照功能不是非常耐久，如果redis因为某些原因造成故障停机，服务器将丢失最近写入、且没有保存到快照中的那些数据。
+>
+> 从 1.1 版本开始， Redis 增加了一种完全耐久的持久化方式： AOF 持久化。
+>
+> 每当 Redis 执行一个改变数据集的命令时（比如 SET）， 这个命令就会被追加到 AOF 文件的末尾。这样的话， 当 Redis 重新启时， 程序就可以通过重新执行 AOF 文件中的命令来达到重建数据集的目的。
+
+#### AOF配置
+
+> 默认关闭。
+
+| 参数                        | 值               | 说明                                                         |
+| --------------------------- | ---------------- | ------------------------------------------------------------ |
+| appendonly                  | yes              | 是否开启AOF持久化                                            |
+| appendfilename              | “appendonly.aof” | 存储的文件的名称                                             |
+| appendfsync                 | everysec         | 同步频率<br />everysec 每隔一秒钟持久化一次<br/>always 每执行一条命令持久化一次<br/>no 持久化的时机交给操作系统处理 |
+| no-appendfsync-on-rewrite   | no               | 执行写入操作时是否进行重写                                   |
+| auto-aof-rewrite-percentage | 100              | 当前AOF文件超过上次AOF文件的百分比后才进行持久化操作         |
+| auto-aof-rewrite-min-size   | 64mb             | 自定执行AOF操作文件最小的大小要达到的大小                    |
+
+##### 写入策略
+
+- **everysec** 【默认】
+
+每秒写入一次，最多丢失1s的数据
+
+- **always**
+
+每一个写操作都保存到aof中，很安全，所以慢。
+
+- **no**
+
+将数据交给操作系统来处理。更快，也更不安全的选择
+
+#### 日志重写
+
+> AOF将客户端的每一个写操作都追加到aof文件末尾，比如对一个key多次执行incr命令，这时候，aof保存每一次命令到aof文件中，aof文件会变得非常大。
+>
+> aof文件太大，加载aof文件恢复数据时，就会非常慢，为了解决这个问题，Redis支持aof文件重写，通过重写aof，可以生成一个恢复当前数据的最少命令集。
+>
+> - **压缩aof文件。减少磁盘占用**。
+> - **压缩成更少的指令集，加快数据恢复速度**。
+
+就是保留结果。不保留中间过程，对多条指令进行合并。
+
+##### 日志重写触发
+
+- no-appendfsync-on-rewrite 这个参数指定了写入aof操作时，是否执行重写。默认和推荐是no。因为每次fsync都执行重写，影响性能。
+- 客户端发起bgrewriteaof命令。
+
+##### 重写原理
+
+- Redis 执行 fork() ，现在同时拥有父进程和子进程。
+- 子进程开始将新 AOF 文件的内容写入到临时文件。
+- 对于所有新执行的写入命令，父进程一边将它们累积到一个内存缓存中，一边将这些改动追加到现有 AOF 文件的末尾,这样样即使在重写的中途发生停机，现有的 AOF 文件也还是安全的。
+- 当子进程完成重写工作时，它给父进程发送一个信号，父进程在接收到信号之后，将内存缓存中的所有数据追加到新 AOF 文件的末尾。
+- 搞定！现在 Redis 原子地用新文件替换旧文件，之后所有命令都会直接追加到新 AOF 文件的末尾。
+
+
+
+#### AOF文件损坏
+
+服务器可能在程序正在对 AOF 文件进行写入时停机， 如果停机造成了 AOF 文件出错（corrupt）， 那么 Redis 在重启时会拒绝载入这个 AOF 文件， 从而确保数据的一致性不会被破坏。当发生这种情况时， 可以用以下方法来修复出错的 AOF 文件：
+
+- 为现有的 AOF 文件创建一个备份。
+
+- 使用 Redis 附带的 redis-check-aof 程序，对原来的 AOF 文件进行修复:
+
+  $ redis-check-aof –fix
+
+- （可选）使用 diff -u 对比修复后的 AOF 文件和原始 AOF 文件的备份，查看两个文件之间的不同之处。
+
+- 重启 Redis 服务器，等待服务器载入修复后的 AOF 文件，并进行数据恢复。
+
+#### 优缺点
+
+##### 优点
+
+- 使用AOF 会让你的Redis**更加耐久**: 你可以使用不同的fsync策略：无fsync,每秒fsync,每次写的时候fsync.使用默认的每秒fsync策略,Redis的性能依然很好(fsync是由后台线程进行处理的,主线程会尽力处理客户端请求),一旦出现故障，你最多丢失1秒的数据.
+- AOF文件是一个只进行追加的日志文件,所以不需要写入seek,即使由于某些原因(磁盘空间已满，写的过程中宕机等等)未执行完整的写入命令,你也也可使用redis-check-aof工具修复这些问题.
+- Redis 可以在 AOF 文件体积变得过大时，自动地在后台对 AOF 进行**重写**： 重写后的新 AOF 文件包含了恢复当前数据集所需的最小命令集合。 整个重写操作是绝对安全的，因为 Redis 在创建新 AOF 文件的过程中，会继续将命令追加到现有的 AOF 文件里面，即使重写过程中发生停机，现有的 AOF 文件也不会丢失。 而一旦新 AOF 文件创建完毕，Redis 就会从旧 AOF 文件切换到新 AOF 文件，并开始对新 AOF 文件进行追加操作。
+- AOF 文件**有序**地保存了对数据库执行的所有写入操作， 这些写入操作以 Redis 协议的格式保存， 因此 AOF 文件的内容非常容易被人读懂， 对文件进行分析（parse）也很轻松。 导出（export） AOF 文件也非常简单： 举个例子， 如果你不小心执行了 FLUSHALL 命令， 但只要 AOF 文件未被重写， 那么只要停止服务器， 移除 AOF 文件末尾的 FLUSHALL 命令， 并重启 Redis ， 就可以将数据集恢复到 FLUSHALL 执行之前的状态。
+
+##### 缺点
+
+- 对于相同的数据集来说，**AOF 文件的体积通常要大于 RDB 文件的体积**。
+- 根据所使用的 fsync 策略，**AOF 的速度可能会慢于 RDB** 。 在一般情况下， 每秒 fsync 的性能依然非常高， 而关闭 fsync 可以让 AOF 的速度和 RDB 一样快， 即使在高负荷之下也是如此。 不过在处理巨大的写入载入时，RDB 可以提供更有保证的最大延迟时间（latency）。
+
+### 选择RDB还是AOF
+
+> 一般来说， 如果想达到足以媲美 PostgreSQL 的数据安全性， 你应该同时使用两种持久化功能。
+>
+> 如果你非常关心你的数据， 但仍然可以承受数分钟以内的数据丢失， 那么你可以只使用 RDB 持久化。
+>
+> 有很多用户都只使用 AOF 持久化， 但我们并不推荐这种方式： 因为定时生成 RDB 快照（snapshot）非常便于进行数据库备份， 并且 RDB 恢复数据集的速度也要比 AOF 恢复的速度要快， 除此之外， 使用 RDB 还可以避免之前提到的 AOF 程序的 bug 。
+
+![img](https://gitee.com/wangigor/typora-images/raw/master/compara-rdb-aofpng)
+
+当RDB与AOF两种方式都开启时，Redis会优先使用AOF日志来恢复数据，因为AOF保存的文件比RDB文件更完整。
+
+- 如果仅作为缓存服务器，可以不使用任何持久化。
+- 开启AOF的情况下，主从同步是时候必然会带来IO的性能影响，此时我们可以调大auto-aof-rewrite-min-size的值，比如5GB。来减少IO的频率
+- 不开启AOF的情况下，可以节省IO的性能影响，这是主从建通过RDB持久化同步，但如果主从都挂掉，影响较大
+
+- **混合持久化开启**
+
+> 4.0版本的混合持久化默认关闭的，通过**aof-use-rdb-preamble**配置参数控制，yes则表示开启，no表示禁用，默认是禁用的，可通过config set修改。
+>
+> 混合持久化同样也是通过bgrewriteaof完成的，不同的是当开启混合持久化时，**fork出的子进程先将共享的内存副本全量的以RDB方式写入aof文件，然后在将重写缓冲区的增量命令以AOF方式写入到文件，写入完成后通知主进程更新统计信息，并将新的含有RDB格式和AOF格式的AOF文件替换旧的的AOF文件。**简单的说：**新的AOF文件前半段是RDB格式的全量数据后半段是AOF格式的增量数据**
+
+***
+
+## 主从复制
+
+> - 实现读写分离
+> - 降低master压力
+> - 实现数据备份
+
+### 同步方式
+
+#### 增量同步
+
+> 增量同步，同步的是指令流。
+>
+> - 主节点将那些对自己状态产生修改性影响的指令记录在本地内存buffer中。
+> - 异步将buffer中的指令同步到从节点。
+> - 从节点 一边执行同步指令，一边向主节点反馈同步位置【偏移量】
+
+<img src="https://gitee.com/wangigor/typora-images/raw/master/redis-master-slave-buffer.jpg" alt="img" style="zoom:50%;" />
+
+- 内存buffer有限。内存buffer是一个定长的环状数组，如果数组内容满了，就会从头开始覆盖前面的内容。
+- 如果网络状态不好，从节点短时间内无法与主节点同步。网络恢复时，可能会有没有同步的指令在buffer已经被后续指令覆盖了，这时通过指令流同步的方式就会有问题，需要进行快照同步【由主节点控制】。
+
+
+
+#### 快照同步
+
+> 快照同步是一个非常耗费资源的操作。
+>
+> - 主库进行bgsave，将内存数据快照到磁盘文件中。
+> - 将快照文件内容全部传送到从节点。
+> - 从节点接收文件完毕之后，先清空当前内存数据，执行一次全量加载。
+> - 通知树节点进行增量同步。
+>
+> 问题：在整个快照同步过程中，主节点的复制buffer还在不停的向前移动，如果快照同步时间过长 或 复制buffer太小，都会导致同步期间的增量指令被覆盖。这到导致快照同步之后无法进行增量同步，需要再次发起快照同步。
+>
+> 如此极有可能陷入**持续快照同步的死循环**。
+
+### 主从配置
+
+
+
+#### 一主多从式
+
+> - master节点可读可写，但是slave节点**只读不可写**(如果非要写可以修改redis.conf文件中的slave-read-only的值来实现)
+> - 在当前的这个主从结构中，如果master挂点，**重启后依然还是master**，主从操作依然可用。
+
+![技术分享图片](https://gitee.com/wangigor/typora-images/raw/master/redis-master-3slave.png)
+
+- 命令配置
+
+> 两个节点手动通过slaveof命令配置
+
+```shell
+127.0.0.1:6380> slaveof 127.0.0.1 6379
+127.0.0.1:6381> slaveof 127.0.0.1 6379
+```
+
+- 配置文件
+
+> 在conf文件中添加master节点配置。
+
+```properties
+slaveof 127.0.0.1 6379
+```
+
+可以使用命令查看当前节点的主从信息
+
+```shell
+127.0.0.1:6380> info replication
+```
+
+
+
+#### 薪火相传式
+
+> 为了减轻master的写压力。
+>
+> 上一个Slave可以是下一个Slave的Master，Slave同样可以接收其他slaves的连接和同步请求，那么该slave作为了
+>
+> 链条中下一个slave的Master。
+>
+> 命令还是同样的命令。
+
+![技术分享图片](https://gitee.com/wangigor/typora-images/raw/master/redis-master-slave-slave.png)
+
+#### 取消同步
+
+> 当Master挂掉后，Slave可键入命令 slaveof no one使当前redis停止与其他Master redis数据同步，转成
+> Master redis。
+>
+> ```shell
+> 127.0.0.1:6380> slaveof no one
+> ```
+
+***
+
+## 集群和哨兵机制
+
+### 环境准备
+
+> 先准备6个redis独立实例。
+>
+> 使用docker-compose比较简单。都是些通用配置，only端口号不同，使用shell生成。
+
+```shell
+#init.sh
+#!/usr/bin/env bash
+
+#在当前文件夹下生成docker-compose头
+cat >> ./docker-compose.yml << EOF
+version: '3'
+services:
+EOF
+
+#redis端口 7001~7006
+#循环创建 每个端口对应的redis实例需要的工作目录和conf
+for port in $(seq 7001 7006);
+do
+mkdir -p ./node-${port}/conf
+touch ./node-${port}/conf/redis.conf
+cat >> ./node-${port}/conf/redis.conf << EOF
+port ${port}
+cluster-enabled yes
+cluster-config-file nodes.conf #nodes.conf会自动生成记录集群信息
+cluster-node-timeout 5000
+cluster-announce-ip 192.168.8.100 #本机ip
+cluster-announce-port ${port}
+cluster-announce-bus-port 1${port}
+appendonly yes #开启AOF
+EOF
+#把当前节点写入docker-compose中，方便之后一起启动
+cat >> ./docker-compose.yml << EOF
+  redis-${port}:
+    image: redis:5.0.7
+    container_name: redis-${port}
+    volumes:
+      - "./node-${port}/data:/data"
+      - "./node-${port}/conf/redis.conf:/etc/redis/redis.conf"
+    ports:
+      - "${port}:${port}"
+      - "1${port}:1${port}"
+    restart: always
+    hostname: redis-${port}
+    command:
+      redis-server /etc/redis/redis.conf
+EOF
+done
+```
+
+```shell
+#赋予所有用户可执行权限
+chmod a+x init.sh
+#执行
+./init.sh
+```
+
+![image-20200722161509357](https://gitee.com/wangigor/typora-images/raw/master/redis-init-result.png)
+
+初始化目录结构生成完成。
+
+```shell
+#启动全部6个redis实例
+docker-compose up -d
+```
+
+![image-20200722161743755](https://gitee.com/wangigor/typora-images/raw/master/redis-docker-compose-ps.png)
+
+六个实例生成完成。每个登录进去都是独立无关联的redis服务端。
+
+### 哨兵机制
+
+> 哨兵机制的产生，是因为前面的主从复制存在问题：
+>
+> 虽然，主从复制解决了数据备份问题。
+>
+> ①可以做到主节点故障不可达时，从节点可以后备顶上来保证数据尽量不丢失。
+>
+> ②从节点扩展了主节点的读能力。分担了主节点的读压力。
+>
+> 但是。
+>
+> 一旦主节点出现了故障，需要**手动**将一个节点晋升为主节点。
+>
+> 同时，需要**修改应用方**的主节点地址。
+>
+> 还需要**手动**命令去调整整个「集群」的结构。
+>
+> 都需要**人工干预**。
+>
+> ***
+>
+> **Sentinel方案**是一个分布式架构。
+>
+> - 包含了若干个Sentinel节点和Redis节点。
+> - Sentinel节点不存储数据，Redis节点是数据节点。
+> - sentinel节点对redis节点和其他sentinel节点进行监控。
+> - 当发现节点不可达时，对节点做下线标识。
+> - 如果被标记的节点是主节点，会和其他sentinel节点进行「协商」，当大多数sentinel节点都认为主节点不可达时，选出一个sentinel节点完成自动故障转移工作，同时会将这个变化适时通知给redis应用方。
+> - 整个过程完全自动。
+>
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-架构图.png)
+
+#### 部署
+
+> 三个sentinel节点分别为 7001、7002、7003。
+>
+> 三个redis节点分别为 【master】7004 和【slave】7005、7006.
+
+##### 配置一对多主从
+
+分别修改两个slave节点7005、7006的配置文件，追加对7004的slaveof配置
+
+注意：注释掉三个节点cluster模式的属性。
+
+```properties
+#cluster-enabled yes
+#cluster-config-file nodes.conf
+#cluster-node-timeout 5000
+#cluster-announce-ip 192.168.8.100
+#cluster-announce-port 7004
+#cluster-announce-bus-port 17004
+slaveof 192.168.8.100 7004
+```
+
+重启7004、7005、7006
+
+```shell
+wangke@wangkedeMacBook-Pro:~/docker/redis> docker restart redis-7004 redis-7005 redis-7006
+redis-7004
+redis-7005
+redis-7006
+```
+
+验证主从关系
+
+![](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-验证主从关系.png)
+
+主节点看到有两个slave。
+
+![image-20200722171958984](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-验证主从关系-slave.png)
+
+从节点也能看到对应的master节点的情况
+
+##### 部署sentinel节点
+
+7001、7002、7003节点增加sentinel配置
+
+> sentinel monitor myMaster 192.168.8.100 7004 2配置代表sentinel节点需要监控192.168.8.100:7004这个主节点，2代表判断主节点失败至少需要2个Sentinel节点同意，myMaster是主节点的别名
+
+```properties
+sentinel monitor myMaster 192.168.8.100 7004 2
+sentinel down-after-milliseconds myMaster 30000
+sentinel parallel-syncs myMaster 1
+sentinel failover-timeout myMaster 180000
+```
+
+> 注意：修改7001、7002、7003三个实例的启动方式。
+> 之前定义在docker-compose.yml中的启动方式是「redis-server」。
+> 需要修改成**「redis-sentinel」**。
+>
+> 否则报错
+>
+> ```log
+> *** FATAL CONFIG FILE ERROR ***
+> Reading the configuration file, at line 9
+> >>> 'sentinel monitor myMaster 192.168.8.100 7004 2'
+> sentinel directive while not in sentinel mode
+> ```
+>
+> 要**删除节点**重新启动。
+>
+> ```shell
+> docker-compose down
+> docker-compose up -d
+> ```
+
+查看sentinel状态
+
+![image-20200723100344425](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-状态.png)
+
+> **可观察到master地址，端口正确。slave节点，sentinel节点数量正确。**
+>
+> 三个sentinel节点的配置文件，都被自动修改
+>
+> ```properties
+> port 7001
+> #cluster-enabled yes
+> #cluster-config-file nodes.conf
+> #cluster-node-timeout 5000
+> #cluster-announce-ip 192.168.8.100
+> #cluster-announce-port 7001
+> #cluster-announce-bus-port 17001
+> appendonly yes
+> sentinel myid eae6e67b9ce0f97c62444b86e1c7c389ba572fd6
+> sentinel deny-scripts-reconfig yes
+> sentinel monitor myMaster 192.168.8.100 7004 2
+> sentinel config-epoch myMaster 0
+> # Generated by CONFIG REWRITE
+> dir "/data"
+> sentinel leader-epoch myMaster 0
+> sentinel known-replica myMaster 172.28.0.1 7006
+> sentinel known-replica myMaster 172.28.0.1 7005
+> sentinel known-sentinel myMaster 172.28.0.4 7002 2f03ac8ac0323f7c12e055a10fcf82b990f19a8e
+> sentinel known-sentinel myMaster 172.28.0.3 7003 08cfa6527022dabe24f15160ab6279c37062d363
+> sentinel current-epoch 0
+> ```
+>
+> - Sentinel节点自动发现了从节点、其余Sentinel节点。
+> - 去掉了默认配置，例如parallel-syncs、failover-timeout参数。
+> - 添加了配置纪元相关参数。
+
+##### springboot-Jedis-sentinel测试
+
+> 之前。docker分配的都内网ip，需要每个redis.conf设置 **slave-announce-ip 192.168.8.100**。
+> 经过 sentinel解析后，会变成**replica-announce-ip "192.168.8.100"**。
+
+- redis配置类
+
+redis.properties
+
+```properties
+redis.nodes=192.168.8.100:7001,192.168.8.100:7002,192.168.8.100:7003
+redis.masterName=myMaster
+redis.maxTotal=10000
+redis.maxIdle=100
+redis.minIdle=50
+redis.timeout=30000
+```
+
+RedisProperties
+
+```java
+@Data
+@ToString
+@Configuration
+@PropertySource("classpath:redis.properties")
+@ConfigurationProperties(prefix = "redis")
+public class RedisProperties {
+    /**
+     * 节点名称
+     */
+    private String nodes;
+
+    /**
+     * Redis服务名称
+     */
+    private String masterName;
+
+    /**
+     * 最大连接数
+     */
+    private int maxTotal;
+
+    /**
+     * 最大空闲数
+     */
+    private int maxIdle;
+
+    /**
+     * 最小空闲数
+     */
+    private int minIdle;
+
+    /**
+     * 连接超时时间
+     */
+    private int timeout;
+}
+```
+
+RedisConfig
+
+```java
+@Configuration
+@Slf4j
+public class RedisConfig {
+
+    @Autowired
+    private RedisProperties redisProperties;
+
+    @Bean
+    public JedisPoolConfig jedisPoolConfig() {
+        JedisPoolConfig config = new JedisPoolConfig();
+
+        config.setMaxTotal(redisProperties.getMaxTotal());
+        config.setMaxIdle(redisProperties.getMaxIdle());
+        config.setMinIdle(redisProperties.getMinIdle());
+
+        config.setTestOnBorrow(true);
+        config.setTestOnReturn(true);
+        return config;
+    }
+
+    @Bean
+    public JedisSentinelPool jedisSentinelPool() {
+
+        String propertiesNodes = redisProperties.getNodes();
+
+        HashSet<String> nodeSet = Sets.newHashSet(
+                propertiesNodes.split(",")
+        );
+
+        return new JedisSentinelPool(redisProperties.getMasterName(), nodeSet, jedisPoolConfig(), redisProperties.getTimeout());
+    }
+
+}
+```
+
+RedisService
+
+> 简单的String的get方法
+
+```java
+@Component
+public class StringRedisService {
+    @Autowired
+    private JedisSentinelPool jedisSentinelPool;
+
+
+    private Jedis getJedis() {
+        return jedisSentinelPool.getResource();
+    }
+
+    public String getString(String key) {
+        Jedis jedis = getJedis();
+        return jedis.get(key);
+    }
+}
+```
+
+测试类
+
+```java
+@Slf4j
+@SpringBootTest
+public class StringRedisServiceTest {
+    @Autowired
+    private StringRedisService redisService;
+
+    @SneakyThrows
+    @Test
+    public void testSentinel() {
+        while (true) {
+
+            TimeUnit.SECONDS.sleep(1);
+          	//这里要try-catch住异常。
+            try {
+                log.info("test = {}", redisService.getString("test"));
+            } catch (Exception e) {
+                log.info("test = {}", e.getMessage());
+            }
+
+        }
+    }
+}
+```
+
+再确认一下节点信息
+
+![image-20200727102101491](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-test-info-before.png)
+
+目前主节点在7006实例。
+
+启动测试
+
+> 每秒打印一条value
+
+![image-20200727102009358](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-test-java-console-before.png)
+
+**==手动关闭master节点==**
+
+日志变化
+
+![image-20200727102345439](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-test-console-after.png)
+
+已经切换到节点7005
+
+![image-20200727102445730](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-test-info-after.png)
+
+集群节点也已经切换至7005
+
+sentinel日志
+
+![image-20200727102713757](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-log-switch-master.png)
+
+#### sentinel 配置说明
+
+- ### sentinel monitor mymaster
+
+```properties
+sentinel monitor <master-name> <ip> <port> <quorum>
+```
+
+哨兵要监控名称为<master-name>，暴露的ip和端口是<ip>:<port>的主节点。
+
+quorum是判断主节点不可达的票数。建议是sentinel节点数量的一半+1。
+
+同时也跟sentinel的领导选举有关，至少要有max（quorum，num（sentinels）/2+1）个Sentinel节点参与选举，才能选出领导者Sentinel，从而完成故障转移。
+
+- ### sentinel down-after-milliseconds
+
+```properties
+sentinel down-after-milliseconds <master-name> <times>
+```
+
+每个Sentinel节点都要通过定期发送**ping命令来判断Redis数据节点和其余Sentinel节点是否可达**，如果超过了down-after-milliseconds配置的时间且没有有效的回复，则判定节点不可达，（单位为毫秒）就是超时时间。这个配置是对节点失败判定的重要依据。
+
+- ### sentinel parallel-syncs
+
+```properties
+sentinel parallel-syncs <master-name> <nums>
+```
+
+当Sentinel节点集合对主节点故障判定达成一致时，Sentinel领导者节点会做故障转移操作，选出新的主节点，原来的从节点会向新的主节点发起复制操作，parallel-syncs就是用来限制在一次故障转移之后，每次向新的主节点发起复制操作的从节点个数。如果这个参数配置的比较大，那么多个从节点会向新的主节点同时发起复制操作，尽管复制操作通常不会阻塞主节点，但是同时向主节点发起复制，必然会对主节点所在的机器造成一定的网络和磁盘IO开销。
+
+- ### sentinel failover-timeout
+
+```properties
+sentinel failover-timeout <master-name> <times>
+```
+
+failover-timeout通常被解释成故障转移超时时间，但实际上它作用于故
+障转移的各个阶段：
+a）选出合适从节点。
+b）晋升选出的从节点为主节点。
+c）命令其余从节点复制新的主节点。
+d）等待原主节点恢复后命令它去复制新的主节点。
+
+- ### sentinel auth-pass
+
+```properties
+sentinel auth-pass <master-name> <password>
+```
+
+如果Sentinel监控的主节点配置了密码，sentinel auth-pass配置通过添加
+主节点的密码，防止Sentinel节点对主节点无法监控。
+
+- ### sentinel notification-script
+
+```properties
+sentinel notification-script <master-name> <script-path>
+```
+
+sentinel notification-script的作用是在故障转移期间，当一些警告级别的Sentinel事件发生（指重要事件，例如-sdown：客观下线、-odown：主观下线）时，会触发对应路径的脚本，并向脚本发送相应的事件参数。
+
+- ### sentinel client-reconfig-script
+
+```properties
+sentinel client-reconfig-script <master-name> <script-path>
+```
+
+sentinel client-reconfig-script的作用是在故障转移结束后，会触发对应路
+径的脚本，并向脚本发送故障转移结果的相关参数。
+
+#### 实现原理
+
+哨兵启动后会与要监控的主数据库建立两条连接
+
+![img](https://gitee.com/wangigor/typora-images/raw/master/redis-sentinel-master-tcp.png)
+
+和主数据库连接建立完成后，哨兵会使用连接2发送如下命令
+
+- 每10秒钟哨兵会向主数据库和从数据库发送INFO 命令
+- 每2秒钟哨兵会向主数据库和从数据的_sentinel_:hello频道发送自己的消息。
+- 每1秒钟哨兵会向主数据、从数据库和其他哨兵节点发送PING命令。
+
+首先,发送INFO命令会返回当前数据库的相关信息(运行id，从数据库信息等)从而实现新节点的自动发现，前面提到的配置哨兵时只需要监控Redis主数据库即可，因为哨兵可以借助INFO命令来获取所有的从数据库信息(slave),进而和这两个从数据库分别建立两个连接。在此之后哨兵会每个10秒钟向已知的主从数据库发送INFO命令来获取信息更新并进行相应的操作。
+
+接下来哨兵向主从数据库的_sentinel_:hello 频道发送信息来与同样监控该数据库的哨兵分享自己的信息。发送信息内容为:
+
+```text
+<哨兵的地址>，<哨兵的端口>，<哨兵的运行ID>，<哨兵的配置版本>，<主数据库的名字>，<主数据库的地址>，<主数据库的端口>，<主数据库的配置版本>
+```
+
+![在这里插入图片描述](https://gitee.com/wangigor/typora-images/raw/master/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9kcGItYm9ib2thb3lhLXNtLmJsb2cuY3Nkbi5uZXQ=,size_16,color_FFFFFF,t_70-20200727105436610.png)
+
+哨兵通过监听的_sentinel_:hello频道接收到其他哨兵发送的消息后会判断哨兵是不是新发现的哨兵，如果是则将其加入已发现的哨兵列表中并创建一个到其的连接(哨兵与哨兵只会创建用来发送PING命令的连接，不会创建订阅频道的连接)。
+
+  实现了自定发现从数据库和其他哨兵节点后，哨兵要做的就是定时监控这些数据和节点运行情况，每隔一定时间向这些节点发送PING命令来监控。间隔时间和down-after-milliseconds选项有关，down-after-milliseconds的值小于1秒时，哨兵会每隔down-after-milliseconds指定的时间发送一次PING命令，当down-after-milliseconds的值大于1秒时，哨兵会每隔1秒发送一次PING命令。
+
+```properties
+// 每隔1秒发送一次PING命令
+sentinel down-after-milliseconds mymaster 60000
+// 每隔600毫秒发送一次PING命令
+sentinel down-after-milliseconds othermaster 600
+```
+
+##### 主管下线
+
+当超过down-after-milliseconds指定时间后，如果**被PING的数据库或节点仍然未回复**，则哨兵认为其主观下线(subjectively down),主观下线表示从当前的哨兵进程看来，该节点已经下线。
+
+##### 客观下线
+
+在主观下线后，如果该节点是主数据库，则哨兵会进一步判断是否需要对其进行故障恢复，哨兵发送SENTINEL is-master-down-by-addr 命令询问其他哨兵节点以了解他们是否也认为该主数据库主观下线，如果达到指定数量时，哨兵会认为其客观下线(objectively down),并选举领头的哨兵节点对主从系统发起故障恢复。这个指定数量就是前面配置的 quorum参数。
+
+该配置表示只有当至少有两个Sentinel节点(包括当前节点)认为该主数据库主观下线时，当前哨兵节点才会认为该主数据库客观下线。接下来选举领头哨兵。
+
+##### 选举领头哨兵
+
+当前哨兵虽然发现了主数据客观下线，需要故障恢复，但故障恢复需要由领头哨兵来完成。这样来保证**同一时间只有一个哨兵来执行故障恢复**，选举领头哨兵的过程使用了==**Raft算法**==，具体过程如下:
+
+- 发现主数据库客观下线的哨兵节点(A)向每个哨兵节点发送命令，要求对象选择自己成为领头哨兵
+- 如果目标哨兵节点没有选过其他人，则会同样将A设置为领头哨兵
+- 如果A发现有超过半数且超过quorum参数值的哨兵节点同样选择自己成为领头哨兵，则A成功成为领头哨兵
+- 当有多个哨兵节点同时参选领头哨兵，则会出现没有任何节点当选的可能，此时每个参选节点将等待一个随机事件重新发起参选请求进行下一轮选举，直到选举成功。
+
+> Raft选举：
+>
+> 规则：群众发起投票成为候选人，候选人得到大多数票至少(n/2)+1，才能成为领导人，（自己可以投自己，当没有接受到请求节点的选票时，发起投票节点才能自己选自己），领导人负责处理所有与客户端交互，是数据唯一入口，协调指挥群众节点。
+>
+> 选举过程：考虑最简单情况，abc三个节点，每个节点只有一张票，当N个节点发出投票请求，其他节点必须投出自己的一票，不能弃票，**最差的情况是每个人都有一票**，那么随机设置一个timeout时间，就像**加时赛**一样，这时同时的概率大大降低，**谁最先恢复过来，就向其他两个节点发出投票请求**，获得大多数选票，成为领导人。选出 Leader 后，Leader 通过定期向所有 Follower 发送心跳信息维持其统治。若 Follower 一段时间未收到 Leader 的心跳则认为 Leader 可能已经挂了再次发起选主过程。
+
+##### 故障恢复
+
+选出领头哨兵后，领头哨兵将会开始对主数据库进行故障恢复.
+
+- 首先领头哨兵将从停止服务的主数据库的从数据库中挑选一个来充当新的主数据库。
+
+|      | 挑选依据                                                     |
+| ---- | ------------------------------------------------------------ |
+| 1    | 所有在线的从数据库中，选择优先级最高的从数据库。**优先级通过replica-priority参数设置** |
+| 2    | 优先级相同，则复制的命令偏移量越大**(复制越完整)**越优先     |
+| 3    | 如果以上都一样，则选择**运行ID较小**的从数据库               |
+
+- 选出一个从数据库后，领头哨兵将向从数据库发送SLAVEOF NO ONE命令使其升格为主数据库，而后领头哨兵向其他从数据库发送 SLAVEOF命令来使其成为新主数据库的从数据库，最后一步则是更新内部的记录，将已经停止服务的旧的主数据库更新为新的主数据库的从数据库，使得当其恢复服务时自动以从数据库的身份继续服务
+
+### cluster集群
+
+> 哨兵模式仍然只在master节点进行写操作。
+>
+> 为了**分担写操作的压力**，Cluster集群应运而生。
+>
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/redis-cluster-架构.jpg)
+>
+> - 所有的redis节点彼此互联(PING-PONG机制),内部使用二进制协议优化传输速度和带宽.
+> - 节点的fail是通过集群中超过半数的master节点检测失效时才生效.
+> - 客户端与redis节点直连,不需要中间proxy层.客户端不需要连接集群所有节点,连接集群中任何一个可用节点即可
+> - redis-cluster把所有的物理节点映射到[0-16383]slot上,cluster 负责维护node<->slot<->key
+>
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/redis-cluster-容错.jpg)
+>
+> - 选举过程是集群中所有master参与,如果半数以上master节点与故障节点通信超过(cluster-node-timeout),认为该节点故障，自动触发故障转移操作.
+> - 如果集群任意master挂掉,且当前master没有slave.集群进入fail状态,也可以理解成集群的slot映射[0-16383]不完成时进入fail状态. ps : redis-3.0.0.rc1加入cluster-require-full-coverage参数,默认关闭,打开集群兼容部分失败.
+> - 如果集群超过半数以上master挂掉，无论是否有slave集群进入fail状态.
+> - 当集群不可用时,所有对集群的操作做都不可用，收到((error) CLUSTERDOWN The cluster is down)错误
+
+#### 部署
+
+> 清空6个redis实例的备份数据。修改回原来的配置文件。重启。
+>
+> docker-compose.yml
+>
+> ```shell
+> redis-sentinel /etc/redis/redis.conf
+> #改为
+> redis-server /etc/redis/redis.conf
+> ```
+>
+> redis.conf
+>
+> ```properties
+> port ${port}
+> cluster-enabled yes
+> cluster-config-file nodes.conf 
+> cluster-node-timeout 5000
+> cluster-announce-ip 192.168.8.100 
+> cluster-announce-port ${port}
+> cluster-announce-bus-port 1${port}
+> appendonly yes 
+> ```
+> 或者删除 **除init.sh**的所有文件。重新生成。
+
+进入任何一个redis实例节点。执行集群命令
+
+```shell
+redis-cli --cluster create 192.168.8.100:7001 192.168.8.100:7002 192.168.8.100:7003 192.168.8.100:7004 192.168.8.100:7005 192.168.8.100:7006 --cluster-replicas 1
+```
+
+![image-20200727163023213](https://gitee.com/wangigor/typora-images/raw/master/redis-cluster-部署.png)
+
+> 三个主节点 【**M**】7001（5461个槽位 [0-5460]）、7002（5462个槽位 [5461-10922]）、7003（5461个槽位 [10923-16383]），分别对应三个从节点【**S**】7004、7005、7006。
+
+可以使用集群方式进入客户端redis-cli，查看集群节点信息。
+
+```shell
+redis-cli -c -p 7001
+```
+
+cluster info
+
+```properties
+cluster_state:ok
+cluster_slots_assigned:16384
+cluster_slots_ok:16384
+cluster_slots_pfail:0
+cluster_slots_fail:0
+cluster_known_nodes:6
+cluster_size:3
+cluster_current_epoch:6
+cluster_my_epoch:1
+cluster_stats_messages_ping_sent:830
+cluster_stats_messages_pong_sent:814
+cluster_stats_messages_sent:1644
+cluster_stats_messages_ping_received:809
+cluster_stats_messages_pong_received:830
+cluster_stats_messages_meet_received:5
+cluster_stats_messages_received:1644
+```
+
+cluster nodes
+
+```shell
+8fb45ffa7b0798a690634e240b64343f33390927 192.168.8.100:7002@17002 master - 0 1595839021466 2 connected 5461-10922
+ba30e565ea0784a2c67f7dd6388cb2c49c802f6d 192.168.8.100:7005@17005 slave 8fb45ffa7b0798a690634e240b64343f33390927 0 1595839022478 5 connected
+9ddb7965b6b294a36dee60d88604899e5bc63c47 192.168.8.100:7006@17006 slave f44bf3d87ba99711e86ae34379843175a6aa456f 0 1595839021466 6 connected
+f44bf3d87ba99711e86ae34379843175a6aa456f 192.168.8.100:7003@17003 master - 0 1595839021000 3 connected 10923-16383
+df6f8dd9c19421f30c91b1794aee526332bbebcf 192.168.8.100:7001@17001 myself,master - 0 1595839021000 1 connected 0-5460
+5722a6d20fcea553d3c38bfcc0e1d432bab8588f 192.168.8.100:7004@17004 slave df6f8dd9c19421f30c91b1794aee526332bbebcf 0 1595839021000 4 connected
+```
+
+部署完毕。
+
+#### 客户端测试
+
+![image-20200727164213523](https://gitee.com/wangigor/typora-images/raw/master/redis-cluster-cli-test.png)
+
+#### springboot测试
+
+pom文件
+
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+application.properties文件
+
+```properties
+spring.redis.cluster.nodes[0]=192.168.8.100:7001
+spring.redis.cluster.nodes[1]=192.168.8.100:7002
+spring.redis.cluster.nodes[2]=192.168.8.100:7003
+spring.redis.cluster.nodes[3]=192.168.8.100:7004
+spring.redis.cluster.nodes[4]=192.168.8.100:7005
+spring.redis.cluster.nodes[5]=192.168.8.100:7006
+```
+
+测试类
+
+```java
+@Slf4j
+@SpringBootTest
+public class RedisClusterTest {
+
+    @Autowired
+    private RedisTemplate redisTemplate;
+
+    @Test
+    public void test() {
+        ValueOperations valueOperations = redisTemplate.opsForValue();
+
+        valueOperations.set("a1", "a1");
+        log.info("a1={}", valueOperations.get("a1"));
+        valueOperations.set("b1", "b1");
+        log.info("b1={}", valueOperations.get("b1"));
+        valueOperations.set("c1", "c1");
+        log.info("c1={}", valueOperations.get("c1"));
+
+    }
+}
+```
+
+#### cluster操作
+
+| 操作                                       | 说明                                                         |
+| ------------------------------------------ | ------------------------------------------------------------ |
+| CLUSTER INFO                               | 打印集群的信息                                               |
+| CLUSTER NODES                              | 列出集群当前已知的所有节点（node），以及这些节点的相关信息。 |
+| CLUSTER MEET <ip> <port>                   | 将 ip 和 port 所指定的节点添加到集群当中，让它成为集群的一份子。 |
+| CLUSTER FORGET <node_id>                   | 从集群中移除 node_id 指定的节点。                            |
+| CLUSTER REPLICATE <node_id>                | 将当前节点设置为 node_id 指定的节点的从节点。                |
+| CLUSTER SAVECONFIG                         | 将节点的配置文件保存到硬盘里面。                             |
+| CLUSTER ADDSLOTS <slot> [slot ...]         | 将一个或多个槽（slot）指派（assign）给当前节点。             |
+| CLUSTER DELSLOTS <slot> [slot ...]         | 移除一个或多个槽对当前节点的指派。                           |
+| CLUSTER FLUSHSLOTS                         | 移除指派给当前节点的所有槽，让当前节点变成一个没有指派任何槽的节点。 |
+| CLUSTER SETSLOT <slot> NODE <node_id>      | 将槽 slot 指派给 node_id 指定的节点，如果槽已经指派给另一个节点，那么先让另一个节点删除该槽>，然后再进行指派。 |
+| CLUSTER SETSLOT <slot> MIGRATING <node_id> | 将本节点的槽 slot 迁移到 node_id 指定的节点中。              |
+| CLUSTER SETSLOT <slot> IMPORTING <node_id> | 从 node_id 指定的节点中导入槽 slot 到本节点。                |
+| CLUSTER SETSLOT <slot> STABLE              | 取消对槽 slot 的导入（**import**）或者迁移（migrate）。      |
+| CLUSTER KEYSLOT <key>                      | 计算键 key 应该被放置在哪个槽上。                            |
+| CLUSTER COUNTKEYSINSLOT <slot>             | 返回槽 slot 目前包含的键值对数量。                           |
+| CLUSTER GETKEYSINSLOT <slot> <count>       | 返回 count 个 slot 槽中的键。                                |
+
+***
 
 ## 事务
 
+> 事务只支持单机版
+>
+> redis不支持事务：
+>
+> - 从实用性的角度来说，失败的命令是由编程错误造成的，而这些错误应该在开发的过程中被发现，而不应该出现在生产环境中。
+> - 因为不需要对回滚进行支持，所以 Redis 的内部可以保持简单且快速
+>   
+
+- 通过multi开启事务
+- 通过exec执行事务
+- 开启事务后的命令进入队列中，不会被立即执行
+- 命令出错或者命令执行出错，不会回滚事务，继续执行
+- 事务没有回滚
+
+```shell
+# 开启事务
+127.0.0.1:6379> multi
+OK
+# 持续添加事务内命令
+127.0.0.1:6379> set k1 bbb
+QUEUED
+127.0.0.1:6379> set k2 ccc
+QUEUED
+127.0.0.1:6379> set k3 ddd
+QUEUED
+127.0.0.1:6379> set k4 eee
+QUEUED
+127.0.0.1:6379> get k1
+QUEUED
+# 执行
+127.0.0.1:6379> exec
+1) OK
+2) OK
+3) OK
+4) OK
+5) "bbb"
+```
+
+### watch
+
+> watch命令可以为 Redis 事务提供 check-and-set （CAS）行为。
+
+watch命令可以监控一个或多个键，一旦其中有一个键被修改（或删除），之后的事务就不会执行。监控一直持续到exec命令（事务中的命令是在exec之后才执行的，所以在multi命令后可以修改watch监控的键值）。假设我们通过watch命令在事务执行之前监控了多个Keys，倘若在watch之后有任何Key的值发生了变化，exec命令执行的事务都将被放弃，同时返回Null multi-bulk应答以通知调用者事务执行失败。
+
+```shell
+127.0.0.1:6379> set b2 bbb
+OK
+127.0.0.1:6379> watch b2
+OK
+127.0.0.1:6379> multi
+OK
+127.0.0.1:6379> set b2 d111
+QUEUED
+127.0.0.1:6379> exec
+1) OK
+127.0.0.1:6379> set b3 bbb
+OK
+127.0.0.1:6379> watch b3
+OK
+127.0.0.1:6379> set b3 aaaa
+OK
+127.0.0.1:6379> set b3 avava
+OK
+127.0.0.1:6379> multi
+OK
+127.0.0.1:6379> set b3 aaaa
+QUEUED
+127.0.0.1:6379> exec
+(nil)
+```
+
+exec后会自动执行unwatch命令，撤销监控
+
+### UnWatch
+
+撤销对一个key的监控
+
+```shell
+127.0.0.1:6379> set n1 aaa
+OK
+127.0.0.1:6379> watch n1
+OK
+127.0.0.1:6379> set n1 bbbb
+OK
+127.0.0.1:6379> unwatch
+OK
+127.0.0.1:6379> multi
+OK
+127.0.0.1:6379> set n1 bbbb
+QUEUED
+127.0.0.1:6379> exec
+1) OK
+127.0.0.1:6379> get n1
+"bbbb"
+```
+
+
+
+***
+
 ## 缓存淘汰策略
+
+### 最大缓存
+
+> 在 redis 中，允许用户设置最大使用内存大小 **server.maxmemory**，默认为0，没有指定最大缓存，如果有新的数据添加，超过最大内存，则会使redis崩溃，所以一定要设置。redis 内存数据集大小上升到一定大小的时候，就会实行数据淘汰策略。
+
+### 主键失效
+
+> 作为一种定期清理无效数据的重要机制，在 Redis 提供的诸多命令中，EXPIRE、EXPIREAT、PEXPIRE、PEXPIREAT 以及 SETEX 和 PSETEX 均可以用来设置一条 Key-Value 对的失效时间，而一条 Key-Value 对一旦被关联了失效时间就会在到期后自动删除（或者说变得无法访问更为准确）
+
+可以给redis中的key设置过期时间，当key过期的时候（生存期为0）,它会被删除。
+
+- 对key进行覆盖会修改数据的生存时间，如set和getSet命令
+
+- 修改key对应的value和使用另外相同的key和value来覆盖以后，当前数据的生存时间不同。 如对一个 key 执行INCR命令，对一个列表进行LPUSH命令，或者对一个哈希表执行HSET命令，这类操作都不会修改 key 本身的生存时间。
+
+- 使用rename对一个 key 进行改名，那么改名后的 key 的生存时间和改名前一样。
+
+- 使用persist命令可以在不删除 key 的情况下，移除 key 的生存时间，让 key 重新成为一个persistent key
+- 使用expire命令可以更新key的生存时间
+  
+
+### 淘汰机制
+
+> 随着不断的向redis中保存数据，当内存剩余空间无法满足添加的数据时，redis 内就会施行数据淘汰策略，清除一部分内容然后保证新的数据可以保存到内存中。
+>
+> 内存淘汰机制是为了更好的使用内存，用一定得miss来换取内存的利用率，保证redis缓存中保存的都是热点数据。
+
+redis淘汰策略配置：maxmemory-policy voltile-lru，支持热配置
+
+- **voltile-lru**：从已设置过期时间的数据集（server.db[i].expires）中挑选最近最少使用的数据淘汰
+- **volatile-ttl**：从已设置过期时间的数据集（server.db[i].expires）中挑选将要过期的数据淘汰
+- **volatile-random**：从已设置过期时间的数据集（server.db[i].expires）中任意选择数据淘汰
+- **allkeys-lru**：从数据集（server.db[i].dict）中挑选最近最少使用的数据淘汰
+- **allkeys-random**：从数据集（server.db[i].dict）中任意选择数据淘汰
+- **no-enviction**（驱逐）：禁止驱逐数据
+
+> 策略规则：
+>
+> -  如果数据呈现**幂律分布**，也就是**一部分数据访问频率高，一部分数据访问频率低**，则使用**allkeys-lru**
+> - 如果数据呈现**平等分布**，也就是**所有的数据访问频率都相同**，则使用**allkeys-random**
+> - volatile-lru策略和volatile-random策略适合我们将一个Redis实例既应用于缓存和又应用于持久化存储的时候，然而我们也可以通过使用两个Redis实例来达到相同的效果，
+> -  将key设置过期时间实际上会消耗更多的内存，因此我们建议使用allkeys-lru策略从而更有效率的使用内存
+
+#### 非精准LRU
+
+> 上面提到的LRU（Least Recently Used）策略，实际上Redis实现的LRU并不是可靠的LRU，也就是名义上我们使用LRU算法淘汰键，但是**实际上被淘汰的键并不一定是真正的最久没用的**，这里涉及到一个权衡的问题，如果需要**在全部键空间内搜索最优解，则必然会增加系统的开销**，Redis是单线程的，也就是同一个实例在每一个时刻只能服务于一个客户端，所以耗时的操作一定要谨慎 。为了在一定成本内实现相对的LRU，早期的Redis版本是**基于采样的LRU**，也就是放弃全部键空间内搜索解改为采样空间搜索最优解。自从Redis3.0版本之后，Redis作者对于基于采样的LRU进行了一些优化，目的是在一定的成本内让结果更靠近真实的LRU。
+
+#### 触发时机
+
+> - 消极方法（passive way），在主键被访问时如果发现它已经失效，那么就删除它
+>
+> - 积极方法（active way），周期性地从设置了失效时间的主键中选择一部分失效的主键删除
+>
+> - 主动删除：当前已用内存超过maxmemory限定时，触发主动清理策略，该策略由启动参数的配置决定
+>
+>   主键具体的失效时间全部都维护在expires这个字典表中。
+>   
+
+***
 
 ## 管道
 
+> Redis是一种基于客户端-服务端模型以及请求/响应协议的TCP服务。
+>
+> 这意味着通常情况下一个请求会遵循以下步骤：
+>
+> - 客户端向服务端发送一个查询请求，并监听Socket返回，通常是以阻塞模式，等待服务端响应。
+> - 服务端处理命令，并将结果返回给客户端。
+>
+> 因此，例如下面是4个命令序列执行情况：
+>
+> - *Client:* INCR X
+> - *Server:* 1
+> - *Client:* INCR X
+> - *Server:* 2
+> - *Client:* INCR X
+> - *Server:* 3
+> - *Client:* INCR X
+> - *Server:* 4
+>
+> 客户端和服务器通过网络进行连接。这个连接可以很快（loopback接口）或很慢（建立了一个多次跳转的网络连接）。无论网络延如何延时，数据包总是能从客户端到达服务器，并从服务器返回数据回复客户端。
+>
+> 这个时间被称之为 RTT (Round Trip Time - 往返时间). 当客户端需要在一个批处理中执行多次请求时很容易看到这是如何影响性能的（例如添加许多元素到同一个list，或者用很多Keys填充数据库）。例如，如果RTT时间是250毫秒（在一个很慢的连接下），即使服务器每秒能处理100k的请求数，我们每秒最多也只能处理4个请求。
+>
+> 如果采用loopback接口，RTT就短得多（比如我的主机ping 127.0.0.1只需要44毫秒），但它任然是一笔很多的开销在一次批量写入操作中。
+>
+> 幸运的是有一种方法可以改善这种情况。
+>
+> 一次请求/响应服务器能实现处理新的请求即使旧的请求还未被响应。这样就可以将*多个命令*发送到服务器，而不用等待回复，最后在一个步骤中读取该答复。
+>
+> 这就是管道（pipelining），是一种几十年来广泛使用的技术。例如许多POP3协议已经实现支持这个功能，大大加快了从服务器下载新邮件的过程。
+>
+> Redis很早就支持管道（pipelining）技术，因此无论你运行的是什么版本，你都可以使用管道（pipelining）操作Redis。下面是一个使用的例子：
+>
+> ```
+> $ (printf "PING\r\nPING\r\nPING\r\n"; sleep 1) | nc localhost 6379
+> +PONG
+> +PONG
+> +PONG
+> ```
+>
+> 这一次我们没有为每个命令都花费了RTT开销，而是只用了一个命令的开销时间。
+>
+> 非常明确的，用管道顺序操作的第一个例子如下：
+>
+> - *Client:* INCR X
+> - *Client:* INCR X
+> - *Client:* INCR X
+> - *Client:* INCR X
+> - *Server:* 1
+> - *Server:* 2
+> - *Server:* 3
+> - *Server:* 4
+>
+> **重要说明**: 使用管道发送命令时，服务器将被迫回复一个队列答复，占用很多内存。所以，如果你需要发送大量的命令，最好是把他们按照合理数量分批次的处理，例如10K的命令，读回复，然后再发送另一个10k的命令，等等。这样速度几乎是相同的，但是在回复这10k命令队列需要非常大量的内存用来组织返回数据内容。
+
+实例
+
+> 以Jedis+redis cluster为例。
+>
+> #### 设计思路
+>
+> 1.首先要根据key计算出此次pipeline会使用到的节点对应的连接（也就是jedis对象，通常每个节点对应一个Pool）。
+> 2.相同槽位的key，使用同一个jedis.pipeline去执行命令。
+> 3.合并此次pipeline所有的response返回。
+> 4.连接释放返回到池中。
+>
+> 也就是将一个JedisCluster下的pipeline分解为每个单节点下独立的jedisPipeline操作，最后合并response返回。具体实现就是通过JedisClusterCRC16.getSlot(key)计算key的slot值，通过每个节点的slot分布，就知道了哪些key应该在哪些节点上。再获取这个节点的JedisPool就可以使用pipeline进行读写了。
+
+上面提到的过程，其实在JedisClusterInfoCache对象中都已经帮助开发人员实现了，但是这个对象在JedisClusterConnectionHandler中为protected并没有对外开放，而且通过JedisCluster的API也无法拿到JedisClusterConnectionHandler对象。所以通过下面两个类将这些对象暴露出来，这样使用getJedisPoolFromSlot就可以知道每个key对应的JedisPool了。
+
+```java
+class JedisClusterPipeline extends JedisCluster {
+        public JedisClusterPipeline(Set<HostAndPort> jedisClusterNode, int connectionTimeout, int soTimeout, int maxAttempts, String password, final GenericObjectPoolConfig poolConfig) {
+            super(jedisClusterNode, connectionTimeout, soTimeout, maxAttempts, password, poolConfig);
+            super.connectionHandler = new JedisSlotAdvancedConnectionHandler(jedisClusterNode, poolConfig,
+                    connectionTimeout, soTimeout, password);
+        }
+
+        public JedisSlotAdvancedConnectionHandler getConnectionHandler() {
+            return (JedisSlotAdvancedConnectionHandler) this.connectionHandler;
+        }
+
+        /**
+         * 刷新集群信息，当集群信息发生变更时调用
+         *
+         * @param
+         * @return
+         */
+        public void refreshCluster() {
+            connectionHandler.renewSlotCache();
+        }
+    }
+
+    class JedisSlotAdvancedConnectionHandler extends JedisSlotBasedConnectionHandler {
+
+        public JedisSlotAdvancedConnectionHandler(Set<HostAndPort> nodes, GenericObjectPoolConfig poolConfig, int connectionTimeout, int soTimeout, String password) {
+            super(nodes, poolConfig, connectionTimeout, soTimeout, password);
+        }
+
+        public JedisPool getJedisPoolFromSlot(int slot) {
+            JedisPool connectionPool = cache.getSlotPool(slot);
+            if (connectionPool != null) {
+                // It can't guaranteed to get valid connection because of node
+                // assignment
+                return connectionPool;
+            } else {
+                renewSlotCache(); //It's abnormal situation for cluster mode, that we have just nothing for slot, try to rediscover state
+                connectionPool = cache.getSlotPool(slot);
+                if (connectionPool != null) {
+                    return connectionPool;
+                } else {
+                    throw new JedisNoReachableClusterNodeException("No reachable node in cluster for slot " + slot);
+                }
+            }
+        }
+    }
+```
+
+逐条执行的测试方法
+
+> 10000条测试。
+
+```java
+private void testJedisCluster(Set<HostAndPort> nodes, JedisPoolConfig config) {
+    JedisCluster jc = new JedisCluster(nodes, 20000, 20000, 1,null, config);
+
+    IntStream.range(0, 10000).parallel().forEach(i -> {
+        jc.set("n_key_" + i, "n_value_" + i);
+    });
+
+}
+```
+
+pipeline测试方法
+
+> 10000条测试。
+
+```java
+private void testJedisClusterPipeline(Set<HostAndPort> nodes, JedisPoolConfig config) {
+    JedisClusterPipeline jedisClusterPipeline = new JedisClusterPipeline(nodes, 20000, 20000, 1, null, config);
+    JedisSlotAdvancedConnectionHandler jedisSlotAdvancedConnectionHandler = jedisClusterPipeline.getConnectionHandler();
+
+    Map<JedisPool, List<String>> poolKeys = new HashMap<>();
+
+    jedisClusterPipeline.refreshCluster();
+
+    IntStream.range(0, 10000).forEach(i -> {
+        String key = "p_key_" + i;
+        int slot = JedisClusterCRC16.getSlot(key);
+        JedisPool jedisPool = jedisSlotAdvancedConnectionHandler.getJedisPoolFromSlot(slot);
+        if (poolKeys.keySet().contains(jedisPool)) {
+            List<String> keys = poolKeys.get(jedisPool);
+            keys.add(key);
+        } else {
+            List<String> keys = new CopyOnWriteArrayList<>();
+            keys.add(key);
+            poolKeys.put(jedisPool, keys);
+        }
+    });
+
+
+    poolKeys.forEach((jedisPool, strings) -> {
+        Jedis jedis = jedisPool.getResource();
+
+        Pipeline pipeline = jedis.pipelined();
+				
+      	//这里注意不能使用parallel()。因为pipeline.set是向流中写命令，非线程安全
+        strings.forEach(key -> {
+            pipeline.set(key, "value");
+        });
+        pipeline.sync();//同步提交
+        pipeline.close();
+    });
+
+}
+```
+
+测试方法
+
+> 使用spring的StopWatch记录两个任务的执行时间。
+
+```java
+@Test
+public void testPipeline() {
+
+    StopWatch watch = new StopWatch();
+
+    Set<HostAndPort> nodes = new HashSet<>();
+    nodes.add(new HostAndPort("192.168.8.100", 7001));
+    nodes.add(new HostAndPort("192.168.8.100", 7002));
+    nodes.add(new HostAndPort("192.168.8.100", 7003));
+    nodes.add(new HostAndPort("192.168.8.100", 7004));
+    nodes.add(new HostAndPort("192.168.8.100", 7005));
+    nodes.add(new HostAndPort("192.168.8.100", 7006));
+
+    JedisPoolConfig config = new JedisPoolConfig();
+    config.setMaxIdle(0);
+    config.setTestOnBorrow(true);
+    config.setTestWhileIdle(true);
+
+    watch.start("testJedisCluster");
+    testJedisCluster(nodes, config);
+    watch.stop();
+  
+    watch.start("testJedisClusterPipeline");
+    testJedisClusterPipeline(nodes, config);
+    watch.stop();
+
+    System.out.println(watch.prettyPrint());
+    for (StopWatch.TaskInfo taskInfo : watch.getTaskInfo()) {
+        System.out.println(taskInfo.getTaskName()+"执行时间："+taskInfo.getTimeSeconds()+"s");
+    }
+
+}
+```
+
+执行结果：
+
+```log
+StopWatch '': running time = 7458599145 ns
+---------------------------------------------
+ns         %     Task name
+---------------------------------------------
+7348143992  099%  testJedisCluster
+110455153  001%  testJedisClusterPipeline
+
+testJedisCluster执行时间：7.348143992s
+testJedisClusterPipeline执行时间：0.110455153s
+```
+
+***
+
 ## 应用缓存
+
+***
+
+## 订阅和发布
+
+***
+
+## 布隆过滤器
+
+***
 
 ## RedisTemplate
 
+***
+
 ## Jedis
+
+***
 
 ## 分布式锁
 
+***
+
 ## IO多路复用
 
-
-
-
-
-
-
-
-
-
-
-
+***
 
 # 参考文档
 
@@ -454,5 +1848,3 @@ Set的实现参考hash的底层实现，Set就是Value都为空的Hash。
 [波波烤鸭redis专栏](https://dpb-bobokaoya-sm.blog.csdn.net/column/info/33752)
 [Redis内部数据结构详解(6)——skiplist](http://zhangtielei.com/posts/blog-redis-skiplist.html)
 [深入理解跳跃链表](https://zhuanlan.zhihu.com/p/91753863)
-
-
