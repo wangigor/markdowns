@@ -1814,6 +1814,287 @@ testJedisClusterPipeline执行时间：0.110455153s
 
 ## 应用缓存
 
+> 手动的方式就不介绍了，这里使用spring-cache实现。
+
+CacheConfig
+
+> Spring-cache配置
+
+```java
+@Configuration
+class CacheConfig extends CachingConfigurerSupport {
+
+    @Bean
+    public CacheManager cacheManager(RedisConnectionFactory factory, RedisSerializer<Object> redisSerializer) {
+        RedisCacheManager cacheManager = RedisCacheManager.builder(factory)
+          			//默认60秒超时时间
+                .cacheDefaults(getRedisCacheConfigurationWithTtl(60, redisSerializer))
+                .build();
+        return cacheManager;
+    }
+
+    private RedisCacheConfiguration getRedisCacheConfigurationWithTtl(Integer minutes, RedisSerializer<Object> redisSerializer) {
+
+        RedisCacheConfiguration redisCacheConfiguration = RedisCacheConfiguration.defaultCacheConfig();
+        redisCacheConfiguration = redisCacheConfiguration
+                .prefixKeysWith("data:test:") //设置数据key前缀
+                .serializeValuesWith(
+                        RedisSerializationContext.SerializationPair.fromSerializer(redisSerializer))
+                .entryTtl(Duration.ofMinutes(minutes));
+
+        return redisCacheConfiguration;
+    }
+
+    @Override
+    public KeyGenerator keyGenerator() {
+        // 当没有指定缓存的 key时来根据类名、方法名和方法参数来生成key
+        return (target, method, params) -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append(target.getClass().getName())
+                    .append(':')
+                    .append(method.getName());
+            if (params.length > 0) {
+                sb.append('[');
+                for (Object obj : params) {
+                    if (obj != null) {
+                        sb.append(obj.toString());
+                    }
+                }
+                sb.append(']');
+            }
+            return sb.toString();
+        };
+    }
+}
+```
+
+
+
+Redis-cluster 配置
+
+```java
+@Configuration
+@EnableCaching
+public class RedisClusterConfig {
+
+
+    @Bean
+    public RedisClusterConfiguration getRedisCluster() {
+        RedisClusterConfiguration redisClusterConfiguration = new RedisClusterConfiguration();
+        Set<RedisNode> jedisClusterNodes = new HashSet<RedisNode>();
+        String[] add = new String[]{
+                "192.168.8.100:7001",
+                "192.168.8.100:7002",
+                "192.168.8.100:7003",
+                "192.168.8.100:7004",
+                "192.168.8.100:7005",
+                "192.168.8.100:7006"
+        };
+        for (String temp : add) {
+            String[] hostAndPort = temp.split(":");
+            jedisClusterNodes.add(new RedisNode(hostAndPort[0], Integer.parseInt(hostAndPort[1])));
+        }
+        redisClusterConfiguration.setClusterNodes(jedisClusterNodes);
+        return redisClusterConfiguration;
+    }
+
+    @Bean
+    public RedisTemplate<Object, Object> redisTemplate(RedisConnectionFactory redisConnectionFactory, RedisSerializer<Object> redisSerializer) {
+
+        RedisTemplate<Object, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(redisConnectionFactory);
+        template.setDefaultSerializer(redisSerializer);
+        template.setValueSerializer(redisSerializer);
+        template.setHashValueSerializer(redisSerializer);
+        template.setKeySerializer(StringRedisSerializer.UTF_8);
+        template.setHashKeySerializer(StringRedisSerializer.UTF_8);
+        template.afterPropertiesSet();
+        return template;
+    }
+
+    @Bean
+    public RedisConnectionFactory redisConnectionFactory(RedisClusterConfiguration redisClusterConfiguration) {
+        JedisConnectionFactory jedisConnectionFactory = new JedisConnectionFactory(redisClusterConfiguration);
+        jedisConnectionFactory.afterPropertiesSet();
+        return jedisConnectionFactory;
+    }
+
+    @Bean
+    public RedisSerializer<Object> redisSerializer() {
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        //反序列化时候遇到不匹配的属性并不抛出异常
+        objectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        //序列化时候遇到空对象不抛出异常
+        objectMapper.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+        //反序列化的时候如果是无效子类型,不抛出异常
+        objectMapper.configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false);
+        //不使用默认的dateTime进行序列化,
+        objectMapper.configure(SerializationFeature.WRITE_DATE_KEYS_AS_TIMESTAMPS, false);
+        //使用JSR310提供的序列化类,里面包含了大量的JDK8时间序列化类
+        objectMapper.registerModule(new JavaTimeModule());
+        //启用反序列化所需的类型信息,在属性中添加@class
+        objectMapper.activateDefaultTyping(LaissezFaireSubTypeValidator.instance, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+        //配置null值的序列化器
+        GenericJackson2JsonRedisSerializer.registerNullValueSerializer(objectMapper, null);
+        return new GenericJackson2JsonRedisSerializer(objectMapper);
+
+    }
+
+}
+```
+
+CacheService
+
+```java
+@Component
+public class CacheService {
+
+    public static String getSign() {
+        return String.valueOf(LocalDateTime.now().toEpochSecond(ZoneOffset.of("+8")));
+    }
+		
+  	//简单hello服务 使用秒级时间戳作为key
+    @Cacheable(value = "test", key = "T(org.example.dubbo.provider.cache.CacheService).getSign()")
+    public String hello() {
+        log.info("hello method invoke...")
+        return "hello cache";
+    }
+    
+}
+```
+
+测试类
+
+```java
+@Slf4j
+@SpringBootTest
+public class TestCache {
+
+    @Autowired
+    CacheService cacheService;
+
+    @SneakyThrows
+    @Test
+    public void cacheTest() {
+      	//总共执行10次，一秒五次。
+        for (int i = 0; i < 10; i++) {
+            TimeUnit.MILLISECONDS.sleep(200);
+            log.info(cacheService.hello());
+        }
+    }
+}
+```
+
+执行结果
+
+```log
+15:33:16.462 [main] INFO  org.example.dubbo.provider.cache.CacheService - hello method invoke...
+15:33:16.473 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:16.703 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:16.911 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:17.120 [main] INFO  org.example.dubbo.provider.cache.CacheService - hello method invoke...
+15:33:17.122 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:17.326 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:17.531 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:17.737 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:17.943 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:18.148 [main] INFO  org.example.dubbo.provider.cache.CacheService - hello method invoke...
+15:33:18.150 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+15:33:18.356 [main] INFO  org.example.dubbo.provider.TestCache - hello cache
+```
+
+### @Cacheable
+
+> @Cacheable可以标记在一个方法上，也可以标记在一个类上。当标记在一个方法上时表示该方法是支持缓存的，当标记在一个类上时则表示该类所有的方法都是支持缓存的。
+
+| 参数      | 解释                                                         | example                                                      |
+| :-------- | :----------------------------------------------------------- | :----------------------------------------------------------- |
+| value     | 缓存的名称，在 spring 配置文件中定义，必须指定至少一个       | 例如: <br />@Cacheable(value=”mycache”) <br />@Cacheable(value={”cache1”,”cache2”} |
+| key       | 缓存的 key，可以为空，如果指定要按照 SpEL 表达式编写，如果不指定，则缺省使用key生成器。 | @Cacheable(value=”testcache”,key=”#userName”)                |
+| condition | 缓存的条件，可以为空，使用 SpEL 编写，返回 true 或者 false，只有为 true 才进行缓存 | @Cacheable(value=”testcache”,condition=”#userName.length()>2”) |
+
+内置属性
+
+> 可以将“#root”省略
+
+| 属性名称    | 描述                        | 示例                 |
+| ----------- | --------------------------- | -------------------- |
+| methodName  | 当前方法名                  | #root.methodName     |
+| method      | 当前方法                    | #root.method.name    |
+| target      | 当前被调用的对象            | #root.target         |
+| targetClass | 当前被调用的对象的class     | #root.targetClass    |
+| args        | 当前方法参数组成的数组      | #root.args[0]        |
+| caches      | 当前被调用的方法使用的Cache | #root.caches[0].name |
+
+### 
+
+### @CachePut
+
+> 使用@CachePut标注的方法在执行前不会去检查缓存中是否存在之前执行过的结果，而是每次都会执行该方法，并将执行结果以键值对的形式存入指定的缓存中。
+
+### @CacheEvict
+
+>  @CacheEvict是用来标注在需要清除缓存元素的方法或类上的。当标记在一个类上时表示其中所有的方法的执行都会触发缓存的清除操作。
+
+@CacheEvict可以指定的属性有value、key、condition、allEntries和beforeInvocation。
+
+其中value、key和condition的语义与@Cacheable对应的属性类似。即value表示清除操作是发生在哪些Cache上的（对应Cache的名称）；key表示需要清除的是哪个key，如未指定则会使用默认策略生成的key；condition表示清除操作发生的条件。下面我们来介绍一下新出现的两个属性allEntries和beforeInvocation。
+
+##### allEntries属性
+
+   allEntries是boolean类型，表示是否需要清除缓存中的所有元素。默认为false，表示不需要。当指定了allEntries为true时，Spring Cache将忽略指定的key。有的时候我们需要Cache一下清除所有的元素，这比一个一个清除元素更有效率。
+
+```java
+@CacheEvict(value="users", allEntries=true)
+   public void delete(Integer id) {
+      System.out.println("delete user by id: " + id);
+   }
+```
+
+##### beforeInvocation属性
+
+​    清除操作默认是在对应方法成功执行之后触发的，即方法如果因为抛出异常而未能成功返回时也不会触发清除操作。使用beforeInvocation可以改变触发清除操作的时间，当我们指定该属性值为true时，Spring会在调用该方法之前清除缓存中的指定元素。
+
+```java
+@CacheEvict(value="users", beforeInvocation=true)
+   public void delete(Integer id) {
+      System.out.println("delete user by id: " + id);
+   }
+```
+
+
+
+### @Caching
+
+> @Caching注解可以让我们在一个方法或者类上同时指定多个Spring Cache相关的注解。其拥有三个属性：cacheable、put和evict，分别用于指定@Cacheable、@CachePut和@CacheEvict。
+
+```java
+@Caching(cacheable = @Cacheable("users"), evict = { @CacheEvict("cache2"),
+   @CacheEvict(value = "cache3", allEntries = true) })
+   public User find(Integer id) {
+      returnnull;
+   }
+```
+
+
+
+### 缓存击穿
+
+> 缓存穿透，是指查询一个数据库一定不存在的数据。正常的使用缓存流程大致是，数据查询先进行缓存查询，如果key不存在或者key已经过期，再对数据库进行查询，并把查询到的对象，放进缓存。如果数据库查询对象为空，则不放进缓存。
+
+**采用缓存空值的方式**，如果从数据库查询的对象为空，也放入缓存，只是设定的缓存过期时间较短，比如设置为60秒。
+
+### 缓存穿透
+
+> 缓存雪崩，是指在某一个时间段，缓存集中过期失效.解决方式就是上面设置过期时间中使用的方式，**灵活设置过期时间。**
+
+### 缓存雪崩
+
+> 缓存击穿，是指一个key非常热点，在不停的扛着大并发，大并发集中对这一个点进行访问，当这个key在失效的瞬间，持续的大并发就穿破缓存，直接请求数据库，就像在一个屏障上凿开了一个洞。解决方式**直接设置为永久key就可以了**。**mutex key互斥锁**可以学习下，但一般情况下用不上！
+
+
+
 ***
 
 ## 订阅和发布
