@@ -2099,6 +2099,124 @@ public class TestCache {
 
 ## 订阅和发布
 
+> Redis 发布订阅(pub/sub)是一种消息通信模式：
+> 发送者(pub)发送消息
+> 订阅者(sub)接收消息
+> Redis 客户端可以订阅任意数量的频道
+>
+> **Redis发布订阅的问题：**
+>
+> **不落盘，有监听就发送，没有监听就丢弃消息。**
+
+两个订阅者
+
+```shell
+# 订阅1 topic = test_channel
+127.0.0.1:7005> subscribe test_channel
+Reading messages... (press Ctrl-C to quit)
+1) "subscribe"
+2) "test_channel"
+3) (integer) 1
+1) "message"
+#接收到 test_channel的hello消息
+2) "test_channel"
+3) "hello"
+```
+
+```shell
+# 订阅2 topic = test_channel,test_channel_2
+127.0.0.1:7004> subscribe test_channel test_channel_2
+Reading messages... (press Ctrl-C to quit)
+1) "subscribe"
+2) "test_channel"
+3) (integer) 1
+1) "message"
+# 接收到 test_channel的hello消息
+2) "test_channel"
+3) "hello"
+```
+
+一个发布者
+
+```shell
+# 向test_channel 发送hello消息
+127.0.0.1:7006> publish test_channel hello
+(integer) 1
+```
+
+> 这里的topic可以是个正则表达式，监听使用**psubscribe <表达式>** 命令。
+
+### spring-boot 实现
+
+增加redis消息监听组件
+
+消息接收器
+
+```java
+@Slf4j
+@Component
+public class RedisReceiver implements MessageListener {
+		
+  	//进行简单的消息接收，打印
+    @Override
+    public void onMessage(Message message, byte[] pattern) {
+        log.info("接收到数据...");
+        log.info(new String(pattern));
+        log.info(new String(message.getBody()));
+        log.info(new String(message.getChannel()));
+    }
+
+}
+```
+
+消息配置
+
+```java
+@Configuration
+public class RedisMessageConfig {
+
+    @Bean
+    public RedisMessageListenerContainer redisMessageListenerContainer(RedisConnectionFactory redisConnectionFactory, MessageListenerAdapter messageListenerAdapter) {
+        RedisMessageListenerContainer redisMessageListenerContainer = new RedisMessageListenerContainer();
+        redisMessageListenerContainer.setConnectionFactory(redisConnectionFactory);
+
+        //可以绑定多个 messageListenerAdapter,配置不同的topic
+        redisMessageListenerContainer.addMessageListener(messageListenerAdapter, new PatternTopic("test_channel"));
+        return redisMessageListenerContainer;
+    }
+
+  	//第二个参数指定反射调用的方法名。
+    @Bean
+    public MessageListenerAdapter messageListenerAdapter(RedisReceiver redisReceiver) {
+        return new MessageListenerAdapter(redisReceiver, "onMessage");
+    }
+
+}
+```
+
+
+
+测试方法
+
+```java
+    @Test
+    public void testTopic(){
+        redisTemplate.convertAndSend("test_channel","hello");
+    }
+```
+
+结果输出
+
+```java
+14:56:49.048 [redisMessageListenerContainer-2] INFO  org.example.dubbo.provider.cache.RedisReceiver - test_channel
+14:56:49.048 [redisMessageListenerContainer-2] INFO  org.example.dubbo.provider.cache.RedisReceiver - hello
+14:56:49.048 [redisMessageListenerContainer-2] INFO  org.example.dubbo.provider.cache.RedisReceiver - test_channel
+```
+
+
+
+
+
 ***
 
 ## 布隆过滤器
