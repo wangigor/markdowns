@@ -2449,6 +2449,200 @@ public class BloomFilterTest {
 
 ## 分布式锁
 
+> redis的分布式锁主要就是靠setnx实现的。
+>
+> 基本思路就是:
+>
+> - **setnx 锁key 自定义value**
+> - **处理业务逻辑**
+> - **del 锁key** 
+
+### 优化一
+
+> **业务处理过程中，系统宕机，无法释放锁。**
+>
+> 使用 **set key value [expiration EX seconds|PX milliseconds] [NX|XX]**命令。
+>
+> **原子操作。**
+>
+> ```shell
+> set lock 1 ex 10 nx
+> ```
+>
+> 如果执行过程中，宕机了，lock会在10秒后失效。
+>
+> 不能使用
+>
+> ```shell
+> setnx lock 1
+> #有宕机风险
+> expire lock 10
+> ```
+>
+> 这是非原子操作。
+
+### 优化二
+
+> 如果业务处理过程中，超时，**超过了expireTime的限制，导致锁提前释放**。
+>
+> 需要加入**「锁续命」**。
+
+### 优化三
+
+> 关于value值，设置为1，**不能标识当前锁的持有者**。
+>
+> 需要**换成业务uuid或者requestId**。
+
+### springboot实现
+
+> 暂不支持可重入。
+
+续命类
+
+```java
+public class WatchDog extends Thread {
+
+    private RedisTemplate<String, String> redisTemplate;
+    private String key;
+    private String value;
+
+    public WatchDog(RedisTemplate<String, String> redisTemplate, String key, String value) {
+        this.redisTemplate = redisTemplate;
+        this.key = key;
+        this.value = value;
+    }
+
+    @Override
+    public void run() {
+      
+        for (; ; ) {
+            try {
+                String lockValue = redisTemplate.opsForValue().get(this.key);
+                if (StringUtils.isBlank(lockValue)
+                        || !StringUtils.isEquals(lockValue, this.value)) {
+                  	//父线程删除标记 或 已被其他线程占用
+                    break;
+                }
+              	//续命三秒
+                redisTemplate.expire(this.key, 3, TimeUnit.SECONDS);
+								
+              	//1秒一个
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+    }
+
+    public static void watch(RedisTemplate redisTemplate, String key, String value) {
+        new WatchDog(redisTemplate, key, value).start();
+    }
+}
+```
+
+测试服务类
+
+> 模拟业务处理
+
+```java
+@Slf4j
+@Service
+public class RedisLockService implements IRedisLock {
+
+    @Autowired
+    private RedisTemplate redisTemplate;
+
+    public static final String LOCK_KEY = "redis_lock_key_1";
+
+    @SneakyThrows
+    @Override
+    public void test(String requestId) {
+
+        try {
+            for (; ; ) {
+
+                //尝试获取锁
+                Boolean hasLocked = redisTemplate.opsForValue().setIfAbsent(LOCK_KEY, requestId, 10, TimeUnit.SECONDS);
+
+                if (hasLocked) {
+                    //看门狗 续命操作
+                    WatchDog.watch(redisTemplate, LOCK_KEY, requestId);
+
+                    //模拟业务操作处理
+                    log.info("业务执行：{}", requestId);
+                    int i = new Random().nextInt(30);
+                    TimeUnit.SECONDS.sleep(i);
+                    log.info("业务执行完成：{}-{}秒", requestId, i);
+
+
+                    break;
+                } else {
+                    //1秒 自旋
+                    TimeUnit.SECONDS.sleep(1);
+                }
+            }
+        } finally {
+            //删除锁
+            redisTemplate.delete(LOCK_KEY);
+        }
+
+
+    }
+}
+```
+
+测试类
+
+```java
+@Slf4j
+@SpringBootTest
+public class RedisLockServiceTest {
+    @Autowired
+    private IRedisLock redisLock;
+
+    @Test
+    public void test() throws InterruptedException {
+      	//10个线程同时请求
+        IntStream.range(0, 10).parallel().forEach(
+                i -> new Thread(() ->
+                        redisLock.test("request-" + i)
+                        , "thread-" + i
+                ).start());
+      
+        log.info("任务发送完成...");
+				
+      	//等所有任务跑完
+        new CountDownLatch(1).await();
+    }
+}
+```
+
+测试结果
+
+```log
+16:00:38.591 [main] INFO  org.example.dubbo.provider.org.example.dubbo.provider.RedisLockServiceTest - 任务发送完成...
+16:00:38.611 [thread-2] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-2
+16:00:58.617 [thread-2] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-2-20秒
+16:00:58.733 [thread-3] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-3
+16:01:18.735 [thread-3] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-3-20秒
+16:01:18.862 [thread-5] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-5
+16:01:43.867 [thread-5] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-5-25秒
+16:01:44.002 [thread-4] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-4
+16:02:10.001 [thread-4] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-4-26秒
+16:02:10.155 [thread-6] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-6
+16:02:14.158 [thread-6] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-6-4秒
+16:02:14.179 [thread-8] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-8
+16:02:22.180 [thread-8] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-8-8秒
+16:02:22.228 [thread-0] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-0
+16:02:39.231 [thread-0] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-0-17秒
+16:02:39.324 [thread-1] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-1
+16:03:04.328 [thread-1] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-1-25秒
+16:03:04.465 [thread-9] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-9
+16:03:06.470 [thread-9] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-9-2秒
+16:03:06.473 [thread-7] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行：request-7
+16:03:08.477 [thread-7] INFO  org.example.dubbo.provider.service.RedisLockService - 业务执行完成：request-7-2秒
+```
+
 ***
 
 ## IO多路复用
