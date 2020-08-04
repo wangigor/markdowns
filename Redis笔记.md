@@ -2213,21 +2213,237 @@ public class RedisMessageConfig {
 14:56:49.048 [redisMessageListenerContainer-2] INFO  org.example.dubbo.provider.cache.RedisReceiver - test_channel
 ```
 
-
-
-
-
 ***
 
 ## 布隆过滤器
 
-***
+> 布隆过滤器是用来判断一个元素是否出现在给定集合中的重要工具，具有快速，比哈希表更节省空间等优点，而缺点在于有一定的误识别率（false-positive，假阳性），亦即，它可能会把不是集合内的元素判定为存在于集合内，不过这样的概率相当小，在大部分的生产环境中是可以接受的；
+>
+> [官网Quick Start](https://oss.redislabs.com/redisbloom/)
+>
+> 其原理比较简单，如下图所示，S集合中有n个元素，利用k个哈希函数，将S中的每个元素映射到一个长度为m的位（bit）数组B中不同的位置上，这些位置上的二进制数均置为1，如果待检测的元素经过这k个哈希函数的映射后，发现其k个位置上的二进制数不全是1，那么这个元素一定不在集合S中，反之，该元素可能是S中的某一个元素
+>
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/redis-bloom.jpg)
+>
+> [在线bloom过滤计算器](https://hur.st/bloomfilter/?n=100000000&p=1.0E-7&m=&k=)
+>
+> 计算公式：
+>
+> - 【预计存储数量】n = ceil(m / (-k / log(1 - exp(log(p) / k))))
+> - 【错误率】p = pow(1 - exp(-k / (m / n)), k)
+> - 【bitmap占用空间】m = ceil((n * log(p)) / log(1 / pow(2, log(2))));
+> - 【hash函数数量】k = round((m / n) * log(2));
 
-## RedisTemplate
+### Redis bloom 模块
 
-***
+```shell
+git clone https://github.com/RedisBloom/RedisBloom.git
+cd redisbloom
+make
+```
 
-## Jedis
+文件夹下产生一个redisbloom.so
+
+> 注意：编译环境默认使用本机环境，**windows、mac、linux各不相同**，不能跨平台使用。
+
+配置近redis中有两种方式
+
+- 一个是redis启动命令增加模块 
+
+```shell
+redis-server --loadmodule /data/redisbloom.so /etc/redis/redis.conf
+```
+
+
+
+- 一个是redis配置模块增加模块配置
+
+```properties
+loadmodule /data/redisbloom.so
+```
+
+### redis client 使用
+
+```shell
+# 添加 bf.add <key> <value>
+127.0.0.1:7001> bf.add test_items item1
+(integer) 1
+
+# 批量添加 bf.madd <key> <value1 value2 ... valueN>
+192.168.8.100:7006> bf.madd test_items a b c
+-> Redirected to slot [3881] located at 192.168.8.100:7004
+1) (integer) 1
+2) (integer) 1
+3) (integer) 1
+
+# 检查是否存在 bf.exists <key> <value>
+192.168.8.100:7004> bf.exists test_items a
+(integer) 1
+192.168.8.100:7004> bf.exists test_items d
+(integer) 0
+
+# 批量检查是否存在 bf.exists <key> <value1 value2 ... valueN>
+192.168.8.100:7004> bf.mexists test_items b c d
+1) (integer) 1
+2) (integer) 1
+3) (integer) 0
+
+# 自定义布隆过滤器属性 bf.reserve <key> <错误率> <预计总数>
+# 如果key存在，就会报错。
+192.168.8.100:7004> bf.reserve test_key 0.00001 10000
+-> Redirected to slot [15118] located at 192.168.8.100:7006
+(error) ERR item exists
+192.168.8.100:7006> bf.reserve test_bf 0.00001 10000
+OK
+
+```
+
+
+
+### spring-boot集成
+
+> redis配置不变。只增加两个组件即刻。
+
+BloomFilter组件
+
+```java
+@Component
+public class BloomFilterComponent {
+
+    @Autowired
+    private RedisTemplate redisTemplate;
+
+    public <T> void add(BloomFilterConfig bloomFilterConfig, String key, T value) {
+
+        Assert.notNull(bloomFilterConfig, "bloomFilterConfig不能为空");
+      
+      	//通过murmurHashOffset计算多个位置坐标
+        int[] offset = bloomFilterConfig.murmurHashOffset(value);
+        for (int i : offset) {
+            redisTemplate.opsForValue().setBit(key, i, true);
+        }
+
+    }
+
+    public <T> boolean exists(BloomFilterConfig bloomFilterConfig, String key, T value) {
+      
+        Assert.notNull(bloomFilterConfig, "bloomFilterConfig不能为空");
+      
+      	//通过murmurHashOffset计算多个位置坐标
+        int[] offset = bloomFilterConfig.murmurHashOffset(value);
+        for (int i : offset) {
+            if (!redisTemplate.opsForValue().getBit(key, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+```
+
+BloomFilter配置
+
+> 目前是原型类，使用的时候实例化。
+
+```java
+public class BloomFilterConfig<T> {
+
+    private int num_HashFunctions;
+    private int size_bitMap;
+    private Funnel<T> funnel;
+
+    public BloomFilterConfig(Funnel<T> funnel, int expectedInsertions, double fpp) {
+        Assert.notNull(funnel, "funnel is null!");
+        this.funnel = funnel;
+        size_bitMap = calculateSizeofBitmap(expectedInsertions, fpp);
+        num_HashFunctions = calculateNumofHashFunction(expectedInsertions, size_bitMap);
+    }
+
+    private int calculateNumofHashFunction(long expectedInsertions, long size_bitMap) {
+        return Math.max(1, (int) Math.round((double) size_bitMap / expectedInsertions * Math.log(2)));
+    }
+
+    private int calculateSizeofBitmap(long expectedInsertions, double fpp) {
+        if (fpp == 0) {
+            fpp = Double.MIN_VALUE;
+        }
+        return (int) (-expectedInsertions * Math.log(fpp) / (Math.log(2) * Math.log(2)));
+    }
+
+
+    public int[] murmurHashOffset(T value) {
+        int[] offset = new int[num_HashFunctions];
+
+        long hash64 = Hashing.murmur3_128().hashObject(value, funnel).asLong();
+        int hash1 = (int) hash64;
+        int hash2 = (int) (hash64 >>> 32);
+        for (int i = 1; i <= num_HashFunctions; i++) {
+            int nextHash = hash1 + i * hash2;
+            if (nextHash < 0) {
+                nextHash = ~nextHash;
+            }
+            offset[i - 1] = nextHash % size_bitMap;
+        }
+
+        return offset;
+
+
+    }
+}
+```
+
+
+
+测试类
+
+```java
+@Slf4j
+@SpringBootTest
+public class BloomFilterTest {
+
+    @Autowired
+    private BloomFilterComponent bloomFilterComponent;
+
+
+    @Test
+    public void test() {
+
+      	//自定义配置
+        BloomFilterConfig<String> stringBloomFilterConfig = new BloomFilterConfig<>(
+                (Funnel<String>) (from, into) -> into.putString(from, Charsets.UTF_8),
+                1000,
+                0.001);
+				
+      	//塞值
+        bloomFilterComponent.add(stringBloomFilterConfig,"test_springboot_bloom","a");
+        bloomFilterComponent.add(stringBloomFilterConfig,"test_springboot_bloom","b");
+        bloomFilterComponent.add(stringBloomFilterConfig,"test_springboot_bloom","c");
+
+      	//检测存在
+        boolean exists = bloomFilterComponent.exists(stringBloomFilterConfig, "test_springboot_bloom", "c");
+        boolean exists1 = bloomFilterComponent.exists(stringBloomFilterConfig, "test_springboot_bloom", "d");
+        boolean exists2 = bloomFilterComponent.exists(stringBloomFilterConfig, "test_springboot_bloom", "e");
+
+        log.info(String.valueOf(exists));
+        log.info(String.valueOf(exists1));
+        log.info(String.valueOf(exists2));
+
+    }
+
+}
+```
+
+输出结果
+
+```log
+09:23:04.292 [main] INFO  org.example.dubbo.provider.org.example.dubbo.provider.BloomFilterTest - true
+09:23:04.292 [main] INFO  org.example.dubbo.provider.org.example.dubbo.provider.BloomFilterTest - false
+09:23:04.292 [main] INFO  org.example.dubbo.provider.org.example.dubbo.provider.BloomFilterTest - false
+```
+
+
+
+
 
 ***
 
