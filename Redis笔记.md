@@ -2645,10 +2645,6 @@ public class RedisLockServiceTest {
 
 ***
 
-## IO多路复用
-
-***
-
 # 参考文档
 
 [Redis实战（通俗易懂，超详细攻略） V2.0版本](https://blog.csdn.net/bernkafly/article/details/89553711)
