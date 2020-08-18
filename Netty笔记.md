@@ -271,6 +271,288 @@ write(socket, tmp_buf, len);
 
 ### socket对比
 
+#### 传统io socket
+
+> 简单的echo程序。
+
+- 服务端
+
+> 增加了多线程。
+
+```java
+		@SneakyThrows
+    @Test
+    public void ServerIO() {
+      	//创建ServerSocket,监听端口3333
+        ServerSocket serverSocket = new ServerSocket(3333);
+      	//持续接收外部socket连接
+        while (true) {
+            Socket socket = serverSocket.accept();
+          	//放到一个线程中读取
+            new ServerThread(socket).start();
+        }
+    }
+
+		//socket工作线程
+    class ServerThread extends Thread {
+        Socket socket;
+
+        public ServerThread(Socket socket) {
+            this.socket = socket;
+        }
+
+        @Override
+        public void run() {
+            try {
+              	//输出流
+                @Cleanup PrintWriter output = new PrintWriter(socket.getOutputStream());
+              	//输入流
+                @Cleanup BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                
+              	//持续读
+              	while (true) {
+                    String line = null;
+
+                    line = input.readLine();
+										//读到，就打印，回复
+                    if (line != null) {
+                        log.info("接收到 : " + line);
+                        output.println("接收到数据：" + line);
+                        output.flush();
+                    }
+                }
+//            socket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+```
+
+- 客户端
+
+> 单线程写，单线程读。
+
+```java
+    @SneakyThrows
+    @Test
+    public void ClientIO() {
+      	
+      	//创建socket及输入输出流
+        Socket socket = new Socket("localhost", 3333);
+        BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        PrintWriter output = new PrintWriter(socket.getOutputStream());
+
+      	//发送线程
+      	//发送10个hello
+        new Thread(() -> {
+            IntStream.range(0, 10).forEach(index -> {
+                String sendString = "hello" + index;
+                log.info("发送：" + sendString);
+                output.println(sendString);
+                output.flush();
+            });
+        }, "发送线程").start();
+
+      	//读取线程，读取打印
+        new Thread(() -> {
+            while (true) {
+                String line = null;
+                try {
+                    line = input.readLine();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                if (line != null) {
+                    log.info("服务器返回：" + line);
+                }
+
+            }
+        }, "读取线程").start();
+
+        new CountDownLatch(1).await();
+    }
+```
+
+#### nio socket
+
+- 服务端
+
+```java
+    private ByteBuffer readBuffer_server = ByteBuffer.allocate(1024);
+    private ByteBuffer writeBuffer_server = ByteBuffer.allocate(1024);
+
+
+    @Test
+    public void server() throws IOException {
+				
+      	//设置本地端口的ServerSocketChannel
+        ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
+        serverSocketChannel.configureBlocking(false);
+        serverSocketChannel.bind(new InetSocketAddress(8000));
+
+      	//注册选择器。监听通道的连接请求。
+        Selector selector = Selector.open();
+        serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+        while (selector.select() > 0) {
+            Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+            while (iterator.hasNext()) {
+                SelectionKey key = iterator.next();
+                iterator.remove();
+
+                if (!key.isValid()) {
+                    continue;
+                }
+								//连接
+                if (key.isAcceptable()) {
+                    accept(key, selector);
+                //读
+                } else if (key.isReadable()) {
+                    read(key, selector);
+                //写
+                } else if (key.isWritable()) {
+                    write(key, selector);
+                }
+            }
+        }
+
+    }
+
+
+    /**
+     * 连接
+     *
+     * @param key
+     * @param selector
+     * @throws IOException
+     */
+    private void accept(SelectionKey key, Selector selector) throws IOException {
+        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+
+        SocketChannel channel = serverSocketChannel.accept();
+        channel.configureBlocking(false);
+
+        channel.register(selector, SelectionKey.OP_READ);
+    }
+
+
+    /**
+     * 读
+     *
+     * @param key
+     * @param selector
+     * @throws IOException
+     */
+    private void read(SelectionKey key, Selector selector) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+
+        readBuffer_server.clear();
+
+
+        //TODO 暂不处理拆包问题。
+        int length = channel.read(readBuffer_server);
+        if (length > 0) {
+            String request = new String(readBuffer_server.array(), 0, length);
+            log.info("request:{}", request);
+
+            //业务处理
+
+            String response = "response:" + request;
+
+            //TODO 暂不处理多请求，覆盖问题。
+            writeBuffer_server.clear();
+            writeBuffer_server.put(response.getBytes());
+            writeBuffer_server.flip();
+            channel.register(selector, SelectionKey.OP_WRITE);
+        }
+    }
+
+    /**
+     * 写
+     *
+     * @param key
+     * @param selector
+     * @throws IOException
+     */
+    private void write(SelectionKey key, Selector selector) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+        channel.write(writeBuffer_server);
+        channel.register(selector, SelectionKey.OP_READ);
+    }
+```
+
+- 客户端
+
+```java
+    private ByteBuffer readBuffer_client = ByteBuffer.allocate(1024);
+    private ByteBuffer writeBuffer_client = ByteBuffer.allocate(1024);
+
+    @Test
+    public void client() throws IOException {
+        SocketChannel channel = SocketChannel.open();
+        channel.configureBlocking(false);
+        channel.connect(new InetSocketAddress("localhost", 8000));
+
+      	//注册select，监听连接
+        Selector selector = Selector.open();
+        channel.register(selector, SelectionKey.OP_CONNECT);
+				//console输入
+        Scanner scanner = new Scanner(System.in);
+
+        while (selector.select() > 0) {
+            Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+            while (iterator.hasNext()) {
+                SelectionKey key = iterator.next();
+                iterator.remove();
+
+                if (key.isConnectable()) {
+                    if (channel.finishConnect()) {
+                        channel.register(selector, SelectionKey.OP_WRITE);
+                    } else {
+                        log.info("连接失败");
+                        System.exit(1);
+                    }
+                } else if (key.isWritable()) {
+                    log.info("请输入数据：");
+                    String input = scanner.nextLine();
+                    writeBuffer_client.clear();
+                    writeBuffer_client.put(input.getBytes());
+                    writeBuffer_client.flip();
+
+                    channel.write(writeBuffer_client);
+
+                    channel.register(selector, SelectionKey.OP_READ);
+                } else if (key.isReadable()) {
+                    readBuffer_client.clear();
+                    int length = channel.read(readBuffer_client);
+                    String response = new String(readBuffer_client.array(), 0, length);
+
+                    log.info("服务端响应：" + response);
+                    channel.register(selector, SelectionKey.OP_WRITE);
+                }
+            }
+        }
+    }
+```
+
+
+
+## AIO
+
+> BIO、NIO、AIO的区别
+>
+> ```text
+> BIO:
+> 发起请求 --->  阻塞等待  ----> 处理完成
+> NIO：
+> Selector主动轮询通道事件 ----> 处理事件 
+> AIO：
+> 发起请求 ----> 通知回调
+> ```
+>
+> 
+
 
 
 
