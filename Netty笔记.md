@@ -1329,6 +1329,54 @@ class SimpleNettyClientHandler extends ChannelHandlerAdapter {
 
 ### 群发
 
+> 消息群发是通过channelGroup来完成的。
+>
+> 把连接上来的客户端channel，放在channelGroup中。接收完一个channel发送的数据后，由channelGroup进行消息发送。
+
+```java
+//服务端群发
+@Slf4j
+public class GroupServerHandler extends ChannelHandlerAdapter {
+
+    /**
+     * 用于存储客户端Channel信息
+     * 也可以自建分组
+     */
+    public static ChannelGroup channels = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+
+  	//新建连接
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        SocketChannel channel = (SocketChannel) ctx.channel();
+        log.info("新的连接：{}:{}", channel.localAddress().getHostName(), channel.localAddress().getPort());
+        //存到group中
+      	channels.add(channel);
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+        SimpleProtocol simpleProtocol = (SimpleProtocol) msg;
+
+        log.info("request:" + simpleProtocol.toString());
+
+        String response = "new message:" + simpleProtocol.getBody();
+				//使用ChannelGroup推送消息
+        channels.writeAndFlush(new SimpleProtocol(response));
+    }
+
+  	//断开连接
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        SocketChannel channel = (SocketChannel) ctx.channel();
+        log.info("断开连接：{}:{}", channel.localAddress().getHostName(), channel.localAddress().getPort());
+        //从group中移除
+      	channels.remove(channel);
+    }
+}
+```
+
+
+
 ### UDP
 
 
