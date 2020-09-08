@@ -349,6 +349,15 @@ class Node<E> {
 ## 源码
 
 > ForkJoinPool源码的位运算是真！的！多！
+>
+> ![image-20200908103416001](https://gitee.com/wangigor/typora-images/raw/master/forkjoinpool流程.png)
+>
+> - 每个线程对应两个队列
+>   - 偶数队列的任务来源于：外部业务线程
+>   - 奇数队列的任务来源于：偶数队列任务fork出的新子任务。
+> - 外部新任务进来时，通过ThreadLocalRandom.getProbe()随机探针，进入线程的偶数队列，并尝试唤醒线程工作。
+> - 工作线程创建完成之后，首先循环扫描所有队列中的任务，窃取执行，如果没有，当前线程闲置，放入ctl中记录「为了建立闲置线程栈」。
+> - 如果任务，需要join休眠等待，先尝试窃取其他线程的任务，为尽可能加速等待任务进行完成，再尝试唤醒闲置线程或者创建新替补线程，执行本线程的任务。进入休眠。
 
 ### 初始化
 
@@ -514,7 +523,9 @@ class Node<E> {
 > - execute。只是提交任务，任务后续返回等待由调用线程处理。
 > - submit。跟execute类似，提交任务，返回task。
 
-最后都调用了**externalPush**，将任务添加到线程池的「当前线程等待队列」中。
+最后都调用了**externalPush**，将任务添加到线程池的「随机队列」中。
+
+> 注意。这里是外部任务，提交到**==偶数队列==**
 
 ```java
 		//这里「不负责真实的添加任务」。主要还是线程池的初始化。
@@ -948,7 +959,7 @@ private void unlockRunState(int oldRunState, int newRunState) {
             if ((v = ws[i]) == null)                   // terminating
                 break;
           	// SS_SEQ : 第17位为1 「1 << 16」也就是2^16
-          	// INACTIVE : 第32位为1 「1 << 31」也就是2*32 ; ~INACTIVE:第31位为1
+          	// INACTIVE : 第32位为1 「1 << 31」也就是2*32 ; ~INACTIVE:后31位为1
           	// vs : sp+2^16 todo
             int vs = (sp + SS_SEQ) & ~INACTIVE;        // next scanState scanState初始化：1 << 31 「<0: inactive; odd:scanning」
             int d = sp - v.scanState;                  // screen CAS
@@ -1018,7 +1029,1040 @@ private void unlockRunState(int oldRunState, int newRunState) {
 
 ### 工作线程
 
+> 工作线程是使用ForkJoinWorkerThreadFactory创建的线程。
+>
+> ```java
+> //默认采用DefaultForkJoinWorkerThreadFactory
+> defaultForkJoinWorkerThreadFactory =
+>          new DefaultForkJoinWorkerThreadFactory();
+> ```
+> ```java
+>     public static interface ForkJoinWorkerThreadFactory {
+>         /**
+>          * Returns a new worker thread operating in the given pool.
+>          *
+>          * @param pool the pool this thread works in
+>          * @return the new worker thread
+>          * @throws NullPointerException if the pool is null
+>          */
+>         public ForkJoinWorkerThread newThread(ForkJoinPool pool);
+>     }
+> ```
+
+>
+>```java
+>static final class DefaultForkJoinWorkerThreadFactory
+>    implements ForkJoinWorkerThreadFactory {
+>    public final ForkJoinWorkerThread newThread(ForkJoinPool pool) {
+>        return new ForkJoinWorkerThread(pool);
+>    }
+>}
+>```
+>
+>```java
+>    protected ForkJoinWorkerThread(ForkJoinPool pool) {
+>        // Use a placeholder until a useful name can be set in registerWorker
+>        super("aForkJoinWorkerThread");
+>        this.pool = pool;
+>        this.workQueue = pool.registerWorker(this);
+>    }
+>```
+>
+>ForkJoinWorkerThread继承自thread。创建完成后，注册到线程池。
+
+#### pool.registerWorker(this)注册worker
+
+```java
+    final WorkQueue registerWorker(ForkJoinWorkerThread wt) {
+      	//异常处理器 可使用java.util.concurrent.ForkJoinPool.common.exceptionHandler系统参数指定
+      	//默认为空
+        UncaughtExceptionHandler handler;
+        wt.setDaemon(true);                           // 设置为守护线程。「程序该停止就停止，不需要等待这个线程跑完」
+        if ((handler = ueh) != null)
+            wt.setUncaughtExceptionHandler(handler);
+      
+      	//创建workQueue
+        WorkQueue w = new WorkQueue(this, wt);
+        int i = 0;                                    // assign a pool index
+        int mode = config & MODE_MASK; //获取异步模式
+        int rs = lockRunState(); 
+        try {
+            WorkQueue[] ws; int n;                    // skip if no array
+            if ((ws = workQueues) != null && (n = ws.length) > 0) {
+              	//SEED_INCREMENT是0x9e3779b9
+              	//他是由黄金分割比例得到的一个32位整数
+              	//phi = (1 + sqrt(5)) / 2 = 1,6180339887498948482045868343656
+              	//2^32 / phi = 0x9e3779b9
+              	//为了更离散。防止碰撞
+                int s = indexSeed += SEED_INCREMENT;  // unlikely to collide
+                int m = n - 1;
+                i = ((s << 1) | 1) & m;               // odd-numbered indices 奇数下标
+                if (ws[i] != null) {                  // collision 发生了碰撞的情况
+                    int probes = 0;                   // step by approx half n 步长为n/2
+                    int step = (n <= 4) ? 2 : ((n >>> 1) & EVENMASK) + 2;
+                  	//递增一个step。再次判断槽位冲突
+                    while (ws[i = (i + step) & m] != null) {
+                      	//尝试n次。如果还冲突就扩容
+                        if (++probes >= n) {
+                            workQueues = ws = Arrays.copyOf(ws, n <<= 1);	//扩容
+                            m = n - 1;
+                            probes = 0;
+                        }
+                    }
+                }
+              	//找到一个空槽位，防止对应的workQueue
+                w.hint = s;                           // use as random seed
+                w.config = i | mode;									// 记录模式
+                w.scanState = i;                      // publication fence 池中下标
+                ws[i] = w;
+            }
+        } finally {
+            unlockRunState(rs, rs & ~RSLOCK);
+        }
+      	//设置线程名称。前缀+下标的一半。「数组可以理解为双倍的线程数，并发数的进位二次幂的两倍」
+        wt.setName(workerNamePrefix.concat(Integer.toString(i >>> 1)));
+        return w;
+    }
+```
+
+#### deregisterWorker(wt, ex)取消注册
+
+> 创建线程过程中发生异常，就取消注册。
+
+```java
+    final void deregisterWorker(ForkJoinWorkerThread wt, Throwable ex) {
+        WorkQueue w = null;
+      	//清空队列组中的线程对应队列
+        if (wt != null && (w = wt.workQueue) != null) {
+            WorkQueue[] ws;                           // remove index from array
+            int idx = w.config & SMASK;
+            int rs = lockRunState();
+            if ((ws = workQueues) != null && ws.length > idx && ws[idx] == w)
+                ws[idx] = null;
+            unlockRunState(rs, rs & ~RSLOCK);
+        }
+        long c;                                       // decrement counts
+      	// ac 和 tc 减一
+        do {} while (!U.compareAndSwapLong
+                     (this, CTL, c = ctl, ((AC_MASK & (c - AC_UNIT)) |
+                                           (TC_MASK & (c - TC_UNIT)) |
+                                           (SP_MASK & c))));
+      	// 清空队列 。取消等待任务
+        if (w != null) {
+            w.qlock = -1;                             // ensure set
+            w.transferStealCount(this);
+            w.cancelAll();                            // cancel remaining tasks
+        }
+        for (;;) {                                    // possibly replace
+            WorkQueue[] ws; int m, sp;
+          	//尝试终止线程池
+						//如果终止不了，看线程池是否已经在进行停止操作          	
+            if (tryTerminate(false, false) || w == null || w.array == null ||
+                (runState & STOP) != 0 || (ws = workQueues) == null ||
+                (m = ws.length - 1) < 0)              // already terminating
+                break;
+          	//如果有不活动的等待线程
+          	//进行释放
+            if ((sp = (int)(c = ctl)) != 0) {         // wake up replacement
+                if (tryRelease(c, ws[sp & m], AC_UNIT))
+                    break;
+            }
+          	//有异常
+          	//没有等待线程
+          	//线程总数未到达并行度 创建一个worker todo 为啥？
+            else if (ex != null && (c & ADD_WORKER) != 0L) {
+                tryAddWorker(c);                      // create replacement
+                break;
+            }
+            else                                      // don't need replacement
+                break;
+        }
+      	//异常处理
+        if (ex == null)                               // help clean on way out
+            ForkJoinTask.helpExpungeStaleExceptions();
+        else                                          // rethrow
+            ForkJoinTask.rethrow(ex);
+    }
+```
+
+#### 启动 wt.start();
+
+```java
+    public synchronized void start() {
+
+        if (threadStatus != 0)
+            throw new IllegalThreadStateException();
+
+        group.add(this);
+
+        boolean started = false;
+        try {
+            start0();
+            started = true;
+        } finally {
+            try {
+                if (!started) {
+                    group.threadStartFailed(this);
+                }
+            } catch (Throwable ignore) {
+            }
+        }
+    }
+
+    private native void start0();
+
+    public void run() {
+        if (workQueue.array == null) { // only run once
+            Throwable exception = null;
+            try {
+                onStart();
+                pool.runWorker(workQueue);
+            } catch (Throwable ex) {
+                exception = ex;
+            } finally {
+                try {
+                    onTermination(exception);
+                } catch (Throwable ex) {
+                    if (exception == null)
+                        exception = ex;
+                } finally {
+                    pool.deregisterWorker(this, exception);
+                }
+            }
+        }
+    }
+```
+
+> 线程启动之后，就会调用 pool.runWorker(workQueue);方法。
+
+#### 获取并执行任务 pool.runWorker(workQueue)
+
+```java
+    final void runWorker(WorkQueue w) {
+      	//初始化任务队列
+        w.growArray();                   // allocate queue
+        int seed = w.hint;               // initially holds randomization hint 随机数
+        int r = (seed == 0) ? 1 : seed;  // avoid 0 for xorShift 非零随机数
+        for (ForkJoinTask<?> t;;) {
+          	//获取任务
+            if ((t = scan(w, r)) != null)
+                w.runTask(t);	//执行任务
+            else if (!awaitWork(w, r))
+                break;
+            r ^= r << 13; r ^= r >>> 17; r ^= r << 5; // xorshift
+        }
+    }
+```
+
+##### 获取任务scan(w, r)
+
+> 按照WorkQueues长度，随机获取队列，进行窃取任务。
+
+```java
+    private ForkJoinTask<?> scan(WorkQueue w, int r) {
+        WorkQueue[] ws; int m;
+        if ((ws = workQueues) != null && (m = ws.length - 1) > 0 && w != null) {
+          	//对应workQueues下标「对应线程标记」 初始非负
+            int ss = w.scanState;                     // initially non-negative
+          	//k和origin不超过workQueues的「随机下标」
+            for (int origin = r & m, k = origin, oldSum = 0, checkSum = 0;;) {
+                WorkQueue q; ForkJoinTask<?>[] a; ForkJoinTask<?> t;
+                int b, n; long c;
+              	//随机队列不为空
+                if ((q = ws[k]) != null) {
+                  	//队列中有任务
+                    if ((n = (b = q.base) - q.top) < 0 &&
+                        (a = q.array) != null) {      // non-empty
+                      	//base元素对应的偏移量
+                        long i = (((a.length - 1) & b) << ASHIFT) + ABASE;
+                      	//获取任务
+                        if ((t = ((ForkJoinTask<?>)
+                                  U.getObjectVolatile(a, i))) != null &&
+                            q.base == b) {
+                          	//第一次总会进来这里的。
+                            if (ss >= 0) {
+                              	//cas 尝试「窃取」任务 ，将原base位置设为空，base右移一位。
+                                if (U.compareAndSwapObject(a, i, t, null)) {
+                                    q.base = b + 1;
+                                  	//如果队列中还有剩余，唤醒其他线程处理。
+                                    if (n < -1)       // signal others
+                                        signalWork(ws, q);
+                                    return t;
+                                }
+                            }
+                          	//如果当前队列对应线程未活动，尝试激活ctl对应的id「非活动线程栈栈顶的线程」
+                            else if (oldSum == 0 &&   // try to activate
+                                     w.scanState < 0)
+                                tryRelease(c = ctl, ws[m & (int)c], AC_UNIT);
+                        }
+                        if (ss < 0)                   // refresh
+                            ss = w.scanState;
+                      	//重新随机r 重置k/origin/oldsum/checksum
+                        r ^= r << 1; r ^= r >>> 3; r ^= r << 10;
+                        origin = k = r & m;           // move and rescan
+                        oldSum = checkSum = 0;
+                        continue;
+                    }
+                    checkSum += b; //checkSum每次都会都会加上当前队列的base值。
+                }
+              	
+              	//每次循环都要进行k+1
+              	//说明没有窃取到任务「窃取任务失败」
+              	//如果进入这个逻辑，说明遍历了一圈都没有窃取到任务，需要将当前线程闲置
+                if ((k = (k + 1) & m) == origin) {    // continue until stable
+                    if ((ss >= 0 || (ss == (ss = w.scanState))) &&
+                        oldSum == (oldSum = checkSum)) {//这里说明每个队列的base值都没有变过
+                        if (ss < 0 || w.qlock < 0)    // already inactive
+                            break;
+                        int ns = ss | INACTIVE;       // try to inactivate 尝试「终止」当前队列
+                        long nc = ((SP_MASK & ns) |		//ns的低32位
+                                   (UC_MASK & ((c = ctl) - AC_UNIT)));//原ctl的高32位
+                        w.stackPred = (int)c;         // hold prev stack top //设置当前队列的前置等待队列为ctl的栈顶线程
+                        U.putInt(w, QSCANSTATE, ns); 	// 当前队列设为不活动。
+                        if (U.compareAndSwapLong(this, CTL, c, nc))//更新ctl
+                            ss = ns;
+                        else
+                            w.scanState = ss;         // back out
+                    }
+                    checkSum = 0;
+                }
+            }
+        }
+        return null; //返回null，说明当前线程和队列，需要闲置。
+    }
+```
+
+##### 执行任务w.runTask(t)
 
 
 
+```java
+        final void runTask(ForkJoinTask<?> task) {
+            if (task != null) {
+                scanState &= ~SCANNING; // mark as busy 设置当前队列的状态为SCANNING 奇数
+              	//执行窃取的任务
+                (currentSteal = task).doExec();
+                U.putOrderedObject(this, QCURRENTSTEAL, null); // release for GC
+              	//执行工作线程对应的workQueue的任务
+              	//这里其实就是根据mode模式，开始逐个取出task，进行doExec
+                execLocalTasks();//注意。这里本地任务，是指线程存的奇数队列。
+                ForkJoinWorkerThread thread = owner;
+                if (++nsteals < 0)      // collect on overflow
+                    transferStealCount(pool);
+                scanState |= SCANNING;
+                if (thread != null)
+                    thread.afterTopLevelExec();
+            }
+        }
+```
+
+> 那doExec()是怎么跟业务代码执行到一起的呢？
+
+```java
+    //状态字段将运行控制状态位打包为单个int，以最小化占用空间并确保原子性（通过CAS）。
+		//状态最初为零，并采用非负值，直到完成为止，然后状态（与DONE_MASK一起）保持值为NORMAL，CANCELLED或EXCEPTIONAL。
+		//其他线程正在等待阻塞的任务将SIGNAL位置1。
+		//设置了SIGNAL的被盗任务完成后，将通过notifyAll唤醒任何侍者。
+		//即使出于某些目的不是最优的，我们还是使用基本的内置等待/通知来利用JVM中的“监视器膨胀”，否则我们将需要模拟JVM以避免增加每个任务的簿记开销。我们希望这些监视器是“胖”的，即，不使用偏置或细锁技术，因此使用一些倾向于避免它们的奇数编码习惯，主要是通过安排每个同步块执行一个wait，notifyAll或两者。
+ 		//这些控制位仅占用状态字段的上半部分（16位）中的一部分。低位用于用户定义的标签。
+		//任务状态
+		volatile int status; // accessed directly by pool and workers
+    static final int DONE_MASK   = 0xf0000000;  // mask out non-completion bits 为了屏蔽掉非完成状态使用的mask
+    static final int NORMAL      = 0xf0000000;  // must be negative 完成状态 负数
+    static final int CANCELLED   = 0xc0000000;  // must be < NORMAL 取消
+    static final int EXCEPTIONAL = 0x80000000;  // must be < CANCELLED 异常
+    static final int SIGNAL      = 0x00010000;  // must be >= 1 << 16 
+    static final int SMASK       = 0x0000ffff;  // short bits for tags 为了获取后16位
+
+		final int doExec() {
+        int s; boolean completed;
+      	//非完成状态
+        if ((s = status) >= 0) {
+            try {
+              	//执行
+                completed = exec();
+            } catch (Throwable rex) {
+                return setExceptionalCompletion(rex);
+            }
+            if (completed)
+                s = setCompletion(NORMAL);
+        }
+        return s;
+    }
+```
+
+```java
+//一个需要子类重写的执行方法
+protected abstract boolean exec();
+```
+
+> 以自定义fork-join测试的例子，继承了RecursiveTask。
+>
+> ```java
+>     //自定义fork-join的方法
+> 		protected abstract V compute();
+> 		
+> 		//执行
+>     protected final boolean exec() {
+>         result = compute();
+>         return true;
+>     }
+> ```
+
+
+
+##### 等到任务awaitWork(w, r)
+
+
+
+### 线程池终止与释放
+
+#### 终止
+
+> tryTerminate(false, false)
+>
+> 第一个参数now:
+>
+> - true：无条件终止
+> - false：要工作到没有工作线程和任务的时候，再终止
+>
+> 第二个参数enable：是否开启SHUTDOWN状态。开启了可在下一次进行关闭
+
+```java
+    /**
+     * Possibly initiates and/or completes termination.
+     *	
+     * @param now if true, unconditionally terminate, else only
+     * if no work and no active workers
+     * @param enable if true, enable shutdown when next possible
+     * @return true if now terminating or terminated
+     */
+		private boolean tryTerminate(boolean now, boolean enable) {
+        int rs;
+      	//如果是公共线程池common实例，不终止。
+      	//这个common实在ForkJoinPool的静态代码块中生成的，为了防止单个jvm会产生多个池实例。也供lambda的parallel流使用。
+        if (this == common)                       // cannot shut down
+            return false;
+      	//线程池状态变更为SHUTDOWN
+      	//enable 为false，不能终止。
+        if ((rs = runState) >= 0) {
+            if (!enable)
+                return false;
+            rs = lockRunState();                  // enter SHUTDOWN phase
+            unlockRunState(rs, (rs & ~RSLOCK) | SHUTDOWN);
+        }
+				//查看线程池状态是否为STOP
+        if ((rs & STOP) == 0) {
+          	//如果不是立即关闭，进行下面逻辑
+            if (!now) {                           // check quiescence
+                for (long oldSum = 0L;;) {        // repeat until stable
+                    WorkQueue[] ws; WorkQueue w; int m, b; long c;
+                    long checkSum = ctl;
+                  	//如果ac+并行度大于0
+                  	//说明有工作线程。不终止
+                    if ((int)(checkSum >> AC_SHIFT) + (config & SMASK) > 0)
+                        return false;             // still active workers
+                  	//检查队列组。为空。跳出循环。
+                    if ((ws = workQueues) == null || (m = ws.length - 1) <= 0)
+                        break;                    // check queues
+                  	//队列组不为空。就遍历
+                    for (int i = 0; i <= m; ++i) {
+                      	//获取工作队列。为空就不管他了。
+                        if ((w = ws[i]) != null) {
+                          	//如果队列中有任务。或者工作队列状态不是未活动「1<<31小于零」。或者正在窃取任务。
+                            if ((b = w.base) != w.top || w.scanState >= 0 ||
+                                w.currentSteal != null) {
+                              	//释放逻辑。
+                                tryRelease(c = ctl, ws[m & (int)c], AC_UNIT);
+                                return false;     // arrange for recheck 当前不关闭。
+                            }
+                          	//队列中已经没有任务了。
+                          	//这里是获取每一个队列的base索引相加。为了做变动测试。
+                            checkSum += b;
+                            if ((i & 1) == 0) //todo qlock不知道干啥的。
+                                w.qlock = -1;     // try to disable external
+                        }
+                    }
+                  	//说明跟上一次所有队列的base相加，没有变动。跳出循环
+                    if (oldSum == (oldSum = checkSum))
+                        break;
+                }
+            }
+          	//将线程池状态改为STOP
+            if ((runState & STOP) == 0) {
+                rs = lockRunState();              // enter STOP phase
+                unlockRunState(rs, (rs & ~RSLOCK) | STOP);
+            }
+        }
+
+      
+      	//完成终止操作 。「三次确认。」
+        int pass = 0;                             // 3 passes to help terminate
+        for (long oldSum = 0L;;) {                // or until done or stable
+            WorkQueue[] ws; WorkQueue w; ForkJoinWorkerThread wt; int m;
+            long checkSum = ctl;
+          	//已经没有工作者了 或者工作队列组为空 
+            if ((short)(checkSum >>> TC_SHIFT) + (config & SMASK) <= 0 ||
+                (ws = workQueues) == null || (m = ws.length - 1) <= 0) {
+              	//就把线程池状态改为TERMINATED
+                if ((runState & TERMINATED) == 0) {
+                    rs = lockRunState();          // done
+                    unlockRunState(rs, (rs & ~RSLOCK) | TERMINATED);
+                    synchronized (this) { notifyAll(); } // for awaitTermination
+                }
+                break; //这里终止循环就行了。不需要再继续操作了。线程池已经停止了。
+            }
+          	//遍历工作队列组
+            for (int i = 0; i <= m; ++i) {
+                if ((w = ws[i]) != null) {
+                  	//这里还是为了校验和的变动测试
+                    checkSum += w.base;
+                    w.qlock = -1;                 // try to disable todo 不懂。
+                    if (pass > 0) {
+                        w.cancelAll();            // clear queue 清空队列
+                        if (pass > 1 && (wt = w.owner) != null) {
+                            if (!wt.isInterrupted()) {
+                                try {             // unblock join
+                                    wt.interrupt(); //中断线程
+                                } catch (Throwable ignore) {
+                                }
+                            }
+                            if (w.scanState < 0)
+                                U.unpark(wt);     // wake up 唤醒当前队列对应线程
+                        }
+                    }
+                }
+            }
+          	//说明还在清理中。下一次循环再试。
+            if (checkSum != oldSum) {             // unstable
+                oldSum = checkSum;
+                pass = 0; //创智pass
+            }
+            else if (pass > 3 && pass > m)        // can't further help
+                break;
+            else if (++pass > 1) {                // try to dequeue
+                long c; int j = 0, sp;            // bound attempts
+              	//遍历释放每一个队列。
+                while (j++ <= m && (sp = (int)(c = ctl)) != 0)
+                    tryRelease(c, ws[sp & m], AC_UNIT);
+            }
+        }
+        return true;
+    }
+```
+
+#### 释放
+
+> 要等等。看不懂。todo。
+
+```java
+    /**
+     * Signals and releases worker v if it is top of idle worker
+     * stack.  This performs a one-shot version of signalWork only if
+     * there is (apparently) at least one idle worker.
+     *
+     * @param c incoming ctl value 最新的ctl数据
+     * @param v if non-null, a worker 
+     * @param inc the increment to active count (zero when compensating)
+     * @return true if successful
+     */
+		private boolean tryRelease(long c, WorkQueue v, long inc) {
+        int sp = (int)c, vs = (sp + SS_SEQ) & ~INACTIVE; Thread p;
+        if (v != null && v.scanState == sp) {          // v is at top of stack
+            long nc = (UC_MASK & (c + inc)) | (SP_MASK & v.stackPred);
+            if (U.compareAndSwapLong(this, CTL, c, nc)) {
+                v.scanState = vs;
+                if ((p = v.parker) != null)
+                    U.unpark(p);
+                return true;
+            }
+        }
+        return false;
+    }
+```
+
+
+
+### 工作队列WorkQueue
+
+```java
+        //构造方法
+				WorkQueue(ForkJoinPool pool, ForkJoinWorkerThread owner) {
+            this.pool = pool;
+            this.owner = owner;
+          	//将base和top的初始位置都放置在队列中心
+            // Place indices in the center of array (that is not yet allocated)
+            base = top = INITIAL_QUEUE_CAPACITY >>> 1;
+        }
+```
+
+#### 属性
+
+```java
+				static final int INITIAL_QUEUE_CAPACITY = 1 << 13;//初始容量
+
+        static final int MAXIMUM_QUEUE_CAPACITY = 1 << 26; // 64M 最大容量
+
+        volatile int scanState;    // versioned, <0: inactive; odd:scanning 扫描状态 <0未激活；奇数在扫描中，且对应WorkQueue[]下标
+        int stackPred;             // pool stack (ctl) predecessor 指向了前一个等待线程的索引 ctl的低16位指向了第一个等待线程的索引，这就形成了一个等待线程「链」
+        int nsteals;               // number of steals 窃取数量
+        int hint;                  // randomization and stealer index hint 随机和窃取下标提示
+        int config;                // pool index and mode 高16位为mode。低16位是WorkQueue[]下标
+        volatile int qlock;        // 1: locked, < 0: terminate; else 0 锁
+        volatile int base;         // index of next slot for poll base初始在队列中心，供其他线程窃取，所有volatile。
+        int top;                   // index of next slot for push top初始跟base一样，供本线程push用
+        ForkJoinTask<?>[] array;   // the elements (initially unallocated) 任务队列。
+        final ForkJoinPool pool;   // the containing pool (may be null) 线程池实例。
+        final ForkJoinWorkerThread owner; // owning thread or null if shared 所有的worker线程
+        volatile Thread parker;    // == owner during call to park; else null 
+        volatile ForkJoinTask<?> currentJoin;  // task being joined in awaitJoin 当前正在join等待结果的任务。
+        volatile ForkJoinTask<?> currentSteal; // mainly used by helpStealer 当前执行的任务是steal来的任务，做记录。
+```
+
+#### 取出任务
+
+```java
+        //取出指定任务 「当前top任务」
+				final boolean tryUnpush(ForkJoinTask<?> t) {
+            ForkJoinTask<?>[] a; int s;
+          	//通过cas，将top-1的位置的t任务置为null，并更新top位置
+            if ((a = array) != null && (s = top) != base &&
+                U.compareAndSwapObject
+                (a, (((a.length - 1) & --s) << ASHIFT) + ABASE, t, null)) {
+                U.putOrderedInt(this, QTOP, s);
+                return true;
+            }
+            return false;
+        }
+```
+
+```java
+        //仅由awaitJoin调用
+				//从队列中取出给定任务，执行。
+        final boolean tryRemoveAndExec(ForkJoinTask<?> task) {
+            ForkJoinTask<?>[] a; int m, s, b, n;
+            if ((a = array) != null && (m = a.length - 1) >= 0 &&
+                task != null) {
+                while ((n = (s = top) - (b = base)) > 0) {
+                    for (ForkJoinTask<?> t;;) {      // traverse from s to b
+                      	//从top开始一个一个往下找
+                        long j = ((--s & m) << ASHIFT) + ABASE;
+                      	//获取的任务为null 说明当前任务已经被其他线程并发窃取走了。
+                      	//而且，因为窃取是从base开始，当前队列的执行是从top开始，说明当前已经执行到了base节点。
+                      	//如果是栈顶元素，就返回true，不是栈顶元素，返回false。
+                      	//这里的返回是要进行helpStealer操作，如果在栈顶位置被窃取，说明当前队列，也没有可执行任务了，可以去帮助窃取线程执行它的任务
+                      	//如果不是栈顶，说明自己的「排在前面的待执行任务」可能还没有执行完，不需要去窃取其他任务。
+                        if ((t = (ForkJoinTask<?>)U.getObject(a, j)) == null)
+                            return s + 1 == top;     // shorter than expected
+                      	//获取到指定任务任务
+                        else if (t == task) {
+                            boolean removed = false;
+                          	//如果是在top节点，top节点置空。
+                          	//如果cas失败，说明当前要执行的节点已经被窃取，当前队列已经空了。
+                            if (s + 1 == top) {      // pop
+                                if (U.compareAndSwapObject(a, j, task, null)) {
+                                    U.putOrderedInt(this, QTOP, s);
+                                    removed = true;
+                                }
+                            }
+                          	//task不在栈顶，且base没有发生变化，将当前任务位置替换成EmptyTask「初始状态就是NORMAL完成」
+                          	//替换成EmptyTask而不是null，是因为队列要保证非空连续，在前面的判断中，null会被判断为空队列。
+                            else if (base == b)      // replace with proxy
+                              	//如果base发生改变不进该逻辑，因为有其他空闲线程在进行任务窃取，就下一个循环再等等看。
+                              	//不行的话再交由等待线程处理。
+                                removed = U.compareAndSwapObject(
+                                    a, j, task, new EmptyTask());
+                          	//删除之后，当前「join」线程执行任务。跳出循环返回。
+                            if (removed)
+                                task.doExec();
+                            break;
+                        }
+                      	//其他任务检查，已完成的清除掉。
+                      	//其实任务要先弹栈置空才执行，这里主要是针对因为join而置换进来的EmptyTask
+                        else if (t.status < 0 && s + 1 == top) {
+                            if (U.compareAndSwapObject(a, j, t, null))
+                                U.putOrderedInt(this, QTOP, s);
+                            break;                  // was cancelled
+                        }
+                      	//找到base节点了，都没有return，就返回失败
+                      	//如果这里要是返回true，需要的条件是空队列。而其他线程「可能排在前面的线程」不归在这里判断。
+                      	//还不能判断是空队列，需要去窃取任务，所以是false。
+                        if (--n == 0)
+                            return false;
+                    }
+                  	//任务已完成状态，返回执行失败。
+                    if (task.status < 0)
+                        return false;
+                }
+            }
+            return true;
+        }
+```
+
+
+
+
+
+### 任务执行结果
+
+> ForkJoinTask是Future的实现类，可以通过get方法获取结果。
+>
+> 但是ForkJoin框架的任务有自己特有的方法，fork()「提交」和join()「获取结果」。
+
+#### fork
+
+
+
+```java
+    public final ForkJoinTask<V> fork() {
+        Thread t;
+      	//如果当前线程是ForkJoinWorkerThread，则放入对应的偶数队列workQueue中。
+        if ((t = Thread.currentThread()) instanceof ForkJoinWorkerThread)
+            ((ForkJoinWorkerThread)t).workQueue.push(this);
+      	//否则，使用将任务作为外部提交放入线程池中。
+        else
+            ForkJoinPool.common.externalPush(this);
+        return this;
+    }
+```
+
+> fork也有两种情况
+>
+> - 「**偶数下标队列**」外部「业务」线程提交任务。externalPush前面讲过
+> - 「**奇数下标队列**」线程池线程ForkJoinWorkerThread的任务fork出的新子任务。
+
+ForkJoinWorkerThread的任务fork出的新子任务调用
+
+```java
+((ForkJoinWorkerThread)t).workQueue.push(this);
+```
+
+```java
+//仅由非共享队列的所有者调用，也就是ForkJoinWorkerThread对应的奇数队列，只能由ForkJoinWorkerThread放入元素
+//这个队列的任务，是其他线程的窃取对象。
+final void push(ForkJoinTask<?> task) {
+    ForkJoinTask<?>[] a; ForkJoinPool p;
+    int b = base, s = top, n;
+    if ((a = array) != null) {    // ignore if queue removed
+        int m = a.length - 1;     // fenced write for task visibility
+        U.putOrderedObject(a, ((m & s) << ASHIFT) + ABASE, task);
+        U.putOrderedInt(this, QTOP, s + 1);
+        if ((n = s - b) <= 1) {
+            if ((p = pool) != null)
+                p.signalWork(p.workQueues, this);
+        }
+        else if (n >= m)
+            growArray();
+    }
+}
+```
+
+#### join
+
+> 等待执行结果
+
+```java
+    public final V join() {
+        int s;
+      	//调用doJoin执行任务
+      	//非正常结束，调用reportException报告异常。
+      	//正常结束，使用getRawResult获取结果返回。
+        if ((s = doJoin() & DONE_MASK) != NORMAL)
+            reportException(s);
+        return getRawResult();
+    }
+```
+
+##### doJoin()
+
+> 只有当前任务是栈顶任务，会被立即执行。
+>
+> 否则进行awaitJoin。
+
+```java
+    private int doJoin() {
+        int s; Thread t; ForkJoinWorkerThread wt; ForkJoinPool.WorkQueue w;
+      	//如果任务状态已完成，返回完成状态
+      	//如果当前线程是ForkJoinWorkerThread：
+      	//	尝试从对应队列中取出并执行。执行完成，返回完成状态，否则「不是栈顶任务」awaitJoin。
+      	//否则调用externalAwaitDone()等待任务执行完成。
+        return (s = status) < 0 ? s :
+            ((t = Thread.currentThread()) instanceof ForkJoinWorkerThread) ?
+            (w = (wt = (ForkJoinWorkerThread)t).workQueue).
+            tryUnpush(this) && (s = doExec()) < 0 ? s :
+            wt.pool.awaitJoin(w, this, 0L) :
+            externalAwaitDone();
+    }
+```
+
+awaitJoin方法
+
+```java
+    //假设有三个任务「A,B,C」顺序进行fork，任务栈为base[A,B,C]top.
+		//进行顺序join「而不是fork的逆序」，在A,B的join时，就会awaitJoin，因为任务不在栈顶。
+		final int awaitJoin(WorkQueue w, ForkJoinTask<?> task, long deadline) {
+        int s = 0;
+        if (task != null && w != null) {
+          	//先获取一下之前的等待任务。
+            ForkJoinTask<?> prevJoin = w.currentJoin;
+          	//设置当前队列的等待任务currentJoin
+            U.putOrderedObject(w, QCURRENTJOIN, task);
+          	//对于CountedCompleter「ForkJoinTask的子类，如果没有后续等待线程，就执行任务完成“通知”」的特殊处理
+          	//这个类，暂时还没研究过
+            CountedCompleter<?> cc = (task instanceof CountedCompleter) ?
+                (CountedCompleter<?>)task : null;
+          	//「轮询等待」
+            for (;;) {
+              	//任务执行完成跳出
+                if ((s = task.status) < 0)
+                    break;
+                if (cc != null)//帮助完成，用于CountedCompleter类，暂不研究。
+                    helpComplete(w, cc, 0);
+              	//当前队列空了，获取自己队列中没找到该任务，说明这个任务已经被其他线程窃取
+              	//执行helpStealer。寻找到窃取它的线程，帮它「窃取线程」执行任务。
+              	//因为可能当前任务需要等待其他任务执行完成，而其他任务可能在队列中，这里帮一帮，窃取一下，「尽可能」加速处理。使得join返回。
+                else if (w.base == w.top || w.tryRemoveAndExec(task))
+                    helpStealer(w, task);
+              	//任务执行完毕
+                if ((s = task.status) < 0)
+                    break;
+              	//计算deadline时间
+                long ms, ns;
+                if (deadline == 0L)
+                    ms = 0L;
+              	//超时就不等了
+                else if ((ns = deadline - System.nanoTime()) <= 0L)
+                    break;
+              	//小于1ms按1ms算
+                else if ((ms = TimeUnit.NANOSECONDS.toMillis(ns)) <= 0L)
+                    ms = 1L;
+              	//补偿措施
+                if (tryCompensate(w)) {
+                  	//线程休眠，等待任务运行完成
+                  	//这里是用wait阻塞的
+                    task.internalWait(ms);
+                  	//线程被唤醒后，增加ctl的活跃线程数。
+                    U.getAndAddLong(this, CTL, AC_UNIT);
+                }
+            }
+          	//恢复为前一个等待任务。
+            U.putOrderedObject(w, QCURRENTJOIN, prevJoin);
+        }
+        return s;
+    }
+```
+
+helpStealer
+
+> 为了加速要等待task的join返回，窃取其他队列的任务执行。
+
+```java
+    private void helpStealer(WorkQueue w, ForkJoinTask<?> task) {
+        WorkQueue[] ws = workQueues;
+        int oldSum = 0, checkSum, m;
+      	//非空容错
+        if (ws != null && (m = ws.length - 1) >= 0 && w != null &&
+            task != null) {
+          	//如果等待的task的任务没有执行完成，就继续循环窃取。
+          	//如果多次计算所有队列的base的计算和都一样，说明也没有窃取的必要了。
+            do {                                       // restart point
+                checkSum = 0;                          // for stability check
+                ForkJoinTask<?> subtask;
+                WorkQueue j = w, v;                    // v is subtask stealer
+              	//外层的descent循环，查看任务是否已经完成。
+                descent: for (subtask = task; subtask.status >= 0; ) {
+                  	//h: 当前线程的hint，初始为队列组下标；如果发生窃取，hint为窃取队列的下标
+                  	//|1 ：将值变为奇数，步长为2.
+                    for (int h = j.hint | 1, k = 0, i; ; k += 2) {
+                      	//索引下标已经越界，没有找到对应的窃取队列，就退出。
+                      	//任务可能已经完成，进入下一次循环检测。
+                        if (k > m)                     // can't find stealer
+                            break descent;
+                      	//逐步查找对应任务所在的队列，找到窃取线程队列。
+                        if ((v = ws[i = (h + k) & m]) != null) {
+                          	//判断是否是窃取线程
+                            if (v.currentSteal == subtask) {
+                              	//如果是，记录窃取线程索引
+                                j.hint = i;
+                                break;
+                            }
+                          	//计算base校验和。
+                            checkSum += v.base;
+                        }
+                    }
+                    for (;;) {                         // help v or descend
+                        ForkJoinTask<?>[] a; int b;
+                      	//找到了窃取队列，也计算一下窃取队列的base校验和。
+                      	//因为找到窃取队列的时候提前break了。
+                        checkSum += (b = v.base);
+                      	//获取窃取线程正在join的任务
+                        ForkJoinTask<?> next = v.currentJoin;
+                      	//subtask.status < 0：如果当前窃取线程要join的任务已经完成。就退出
+                      	//j.currentJoin != subtask：如果当前「被窃取线程」的等待任务不是我们需要等待的任务。就退出「可能在之前的步骤中，任务已经执行完成，进入下一个循环查看目标任务状态」
+                        //v.currentSteal != subtask：如果当前窃取线程的窃取任务发生变化。就退出「说明目标等待任务可能已经完成」
+                      	if (subtask.status < 0 || j.currentJoin != subtask ||
+                            v.currentSteal != subtask) // stale
+                            break descent;
+                      	//如果窃取任务队列没有等待任务
+                        if (b - v.top >= 0 || (a = v.array) == null) {
+                          	//而且窃取线程没有join等待完成的任务，退出重新判断任务是否已完成
+                            if ((subtask = next) == null)
+                                break descent;
+                          	//否则帮窃取线程A的窃取线程B去执行任务
+                            j = v;
+                            break;
+                        }
+                      	//窃取窃取线程的任务，从base开始
+                        int i = (((a.length - 1) & b) << ASHIFT) + ABASE;
+                        ForkJoinTask<?> t = ((ForkJoinTask<?>)
+                                             U.getObjectVolatile(a, i));
+                      	//相当于双端检测，base有没有变
+                      	//避免进行无效的并发窃取。
+                        if (v.base == b) {
+                          	//说明可能其他线程已经窃取了这里的base，还没来得及更新base的下标
+                            if (t == null)             // stale
+                                break descent;
+                          	//cas弹出任务，置空base
+                            if (U.compareAndSwapObject(a, i, t, null)) {
+                              	//base右移
+                                v.base = b + 1;
+                              	//记录被窃取队列w的窃取任务
+                                ForkJoinTask<?> ps = w.currentSteal;
+                                int top = w.top;
+                                do {
+                                  	//将窃取来的任务，放置在currentSteal中记录
+                                    U.putOrderedObject(w, QCURRENTSTEAL, t);
+                                  	//执行任务
+                                    t.doExec();        // clear local tasks too
+                                  //要等待的任务没有执行完，并且，刚才执行的任务发生了fork新任务，那么继续执行新任务。
+                                } while (task.status >= 0 &&
+                                         w.top != top &&
+                                         (t = w.pop()) != null);
+                              	//恢复上一个窃取任务。
+                                U.putOrderedObject(w, QCURRENTSTEAL, ps);
+                              	//如果w有自己的local任务需要执行，就先不窃取了。
+                                if (w.base != w.top)
+                                    return;            // can't further help
+                            }
+                        }
+                    }
+                }
+            } while (task.status >= 0 && oldSum != (oldSum = checkSum));
+        }
+    }
+```
+
+
+
+ tryCompensate
+
+> 阻塞前，尝试创建一个补偿线程去帮忙处理下任务。
+>
+> 如果不能阻塞，就不阻塞，返回false。
+
+```java
+private boolean tryCompensate(WorkQueue w) {
+    boolean canBlock; //是否可以阻塞标记
+    WorkQueue[] ws; long c; int m, pc, sp;
+  	//当前队列被锁，为空，都不可以阻塞
+    if (w == null || w.qlock < 0 ||           // caller terminating
+        (ws = workQueues) == null || (m = ws.length - 1) <= 0 ||
+        (pc = config & SMASK) == 0)           // parallelism disabled
+        canBlock = false;
+  	//存在非活动线程，尝试释放它，加快任务进行。
+  	//如果非活动线程唤醒成功，当前线程阻塞。返回唤醒结果
+    else if ((sp = (int)(c = ctl)) != 0)      // release idle worker
+        canBlock = tryRelease(c, ws[sp & m], 0L);
+    else {
+      	//获取ac和tc
+        int ac = (int)(c >> AC_SHIFT) + pc;
+        int tc = (short)(c >> TC_SHIFT) + pc;
+        int nbusy = 0;                        // validate saturation
+      	//饱和度校验
+        for (int i = 0; i <= m; ++i) {        // two passes of odd indices 
+            WorkQueue v;
+          	//获取所有的奇数节点，如果活动，nbusy+1；
+          	//注意！这里计算了两次，因为++i，且&m.
+          	//为啥需要两次：可能是看为了减小误差
+            if ((v = ws[((i << 1) | 1) & m]) != null) {
+                if ((v.scanState & SCANNING) != 0)
+                    break;
+                ++nbusy;
+            }
+        }
+      	//看工作个数是否跟tc相等，不相等说明有空闲线程
+      	//先不等待，看看任务执行完了没有
+        if (nbusy != (tc << 1) || ctl != c)
+            canBlock = false;                 // unstable or stale
+      	//tc >= pc :如果当前线程总数已经达到并行度。
+      	//且 ac > 1 :有除自己以外的活动线程。
+      	// 且 w.isEmpty() : 么有其他任务要执行了
+      	//就不需要创建其他替补线程来处理任务了。
+        else if (tc >= pc && ac > 1 && w.isEmpty()) {
+          	//否则，自己需要休眠、
+          	//减少活跃线程数
+            long nc = ((AC_MASK & (c - AC_UNIT)) |
+                       (~AC_MASK & c));       // uncompensated
+            canBlock = U.compareAndSwapLong(this, CTL, c, nc);
+        }
+      	//如果超过了最大线程数
+      	//或者对于common池，超过了指定并发度+common池默认的最大线程数
+      	//抛出RejectedExecutionException异常
+        else if (tc >= MAX_CAP ||
+                 (this == common && tc >= pc + commonMaxSpares))
+            throw new RejectedExecutionException(
+                "Thread limit exceeded replacing blocked worker");
+        else {                                // similar to tryAddWorker
+            boolean add = false; int rs;      // CAS within lock
+          	//增加线程总数tc.因为ac一加一减没变化。
+            long nc = ((AC_MASK & c) |
+                       (TC_MASK & (c + TC_UNIT)));
+            if (((rs = lockRunState()) & STOP) == 0)
+                add = U.compareAndSwapLong(this, CTL, c, nc);
+            unlockRunState(rs, rs & ~RSLOCK);
+          	//添加成功，就返回可以阻塞
+            canBlock = add && createWorker(); // throws on exception
+        }
+    }
+    return canBlock;
+}
+```
+
+那么回到doJoin，如果当前线程不是ForkJoinWorkerThread，是外部线程「业务线程」。
+
+需要externalAwaitDone()额外等待完成。
+
+```java
+private int externalAwaitDone() {
+  	//对CountedCompleter的处理
+    int s = ((this instanceof CountedCompleter) ? // try helping
+             ForkJoinPool.common.externalHelpComplete(
+                 (CountedCompleter<?>)this, 0) :
+             //非CountedCompleter：尝试从栈顶获取任务，并执行。
+             ForkJoinPool.common.tryExternalUnpush(this) ? doExec() : 0);
+  	//如果任务不在栈顶，就阻塞等待。
+    if (s >= 0 && (s = status) >= 0) {
+        boolean interrupted = false;
+      	//就是持续阻塞。
+        do {
+            if (U.compareAndSwapInt(this, STATUS, s, s | SIGNAL)) {
+                synchronized (this) {
+                    if (status >= 0) {
+                        try {
+                            wait(0L);
+                        } catch (InterruptedException ie) {
+                            interrupted = true;
+                        }
+                    }
+                    else
+                        notifyAll();
+                }
+            }
+        } while ((s = status) >= 0);
+        if (interrupted)
+            Thread.currentThread().interrupt();
+    }
+    return s;
+}
+```
 
