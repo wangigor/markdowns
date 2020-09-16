@@ -1375,13 +1375,2156 @@ public class GroupServerHandler extends ChannelHandlerAdapter {
 }
 ```
 
-
-
 ### UDP
 
+todo
 
 
 
+
+
+## Selector
+
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/selector.png)
+>
+>  SelectableChannel的多路复用器multiplexor。
+
+### Selector创建
+
+```java
+//入口
+Selector selector = Selector.open();
+```
+
+```java
+		//通过调用系统默认的SelectorProvider，来创建selector
+		public static Selector open() throws IOException {
+        return SelectorProvider.provider().openSelector();
+    }
+```
+
+#### provider
+
+```java
+    public static SelectorProvider provider() {
+      	//懒汉式单例
+        synchronized (lock) {
+            if (provider != null)
+                return provider;
+          	//权限相关，暂时不管
+            return AccessController.doPrivileged(
+                new PrivilegedAction<SelectorProvider>() {
+                    public SelectorProvider run() {
+                      			//如果系统属性有java.nio.channels.spi.SelectorProvider对应的class属性，初始化「newInstance」之。
+                            if (loadProviderFromProperty())
+                                return provider;
+                      			//ServiceLoader.load(SelectorProvider.class,ClassLoader.getSystemClassLoader());
+                      			//通过SPI从jar包的META-INF/services/路径下查找SelectorProvider指定的impl类。
+                            if (loadProviderAsService())
+                                return provider;
+                      			//否则使用系统默认的provider
+                            provider = sun.nio.ch.DefaultSelectorProvider.create();
+                            return provider;
+                        }
+                    });
+        }
+    }
+```
+
+#### DefaultSelectorProvider
+
+> 不同平台的jdk有不同的实现
+
+| 系统          | Provider                    |
+| ------------- | --------------------------- |
+| windows       | **WindowsSelectorProvider** |
+| linux-SunOS   | **DevPollSelectorProvider** |
+| linux-2.6以后 | **EPollSelectorProvider**   |
+| MACos         | **KQueueSelectorProvider**  |
+
+以mac为例。
+
+```java
+public class KQueueSelectorProvider extends SelectorProviderImpl {
+    public KQueueSelectorProvider() {
+    }
+
+    public AbstractSelector openSelector() throws IOException {
+        return new KQueueSelectorImpl(this);
+    }
+}
+```
+
+```java
+    KQueueSelectorImpl(SelectorProvider var1) {
+        super(var1);
+      	//native调用pipe()函数返回两个文件描述符fd
+        long var2 = IOUtil.makePipe(false);
+      	//高32位fd0只读数据
+        this.fd0 = (int)(var2 >>> 32);
+      	//低32位fd1只写数据
+        this.fd1 = (int)var2;
+
+        try {
+          	//初始化
+            this.kqueueWrapper = new KQueueArrayWrapper();
+            this.kqueueWrapper.initInterrupt(this.fd0, this.fd1);
+            this.fdMap = new HashMap();//fd红黑树
+            this.totalChannels = 1;
+        } catch (Throwable var8) {
+            try {
+                FileDispatcherImpl.closeIntFD(this.fd0);
+            } catch (IOException var7) {
+                var8.addSuppressed(var7);
+            }
+
+            try {
+                FileDispatcherImpl.closeIntFD(this.fd1);
+            } catch (IOException var6) {
+                var8.addSuppressed(var6);
+            }
+
+            throw var8;
+        }
+    }
+```
+
+
+
+### 通道注册register
+
+```java
+serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+```
+
+把channel注册到selector上，并标注应该注意的通道事件。
+
+```java
+    public final SelectionKey register(Selector sel, int ops,
+                                       Object att)
+        throws ClosedChannelException
+    {
+        synchronized (regLock) {
+          	//通道检查
+            if (!isOpen())
+                throw new ClosedChannelException();
+            if ((ops & ~validOps()) != 0)
+                throw new IllegalArgumentException();
+            if (blocking)
+                throw new IllegalBlockingModeException();
+          	//先查找已经监听的channel的SelectionKey
+          	//如果有，设置新的感兴趣操作「事件」
+            SelectionKey k = findKey(sel);
+            if (k != null) {
+                k.interestOps(ops);
+                k.attach(att);
+            }
+          	//新注册
+            if (k == null) {
+                // New registration
+                synchronized (keyLock) {
+                    if (!isOpen())
+                        throw new ClosedChannelException();
+                  	//创建新的SelectionKeyImpl并设置感兴趣事件
+                    k = ((AbstractSelector)sel).register(this, ops, att);
+                  	//加入selector的SelectionKey[]中
+                    addKey(k);
+                }
+            }
+            return k;
+        }
+    }
+```
+
+### select()
+
+```java
+    public int select(long var1) throws IOException {
+        if (var1 < 0L) {
+            throw new IllegalArgumentException("Negative timeout");
+        } else {
+            return this.lockAndDoSelect(var1 == 0L ? -1L : var1);
+        }
+    }
+
+    public int select() throws IOException {
+        return this.select(0L);
+    }
+
+    public int selectNow() throws IOException {
+        return this.lockAndDoSelect(0L);
+    }
+
+```
+
+> 三个重载方法，都是调用lockAndDoSelect
+
+```java
+    //调用子类实现。为了适应各种平台的差异。
+		protected abstract int doSelect(long var1) throws IOException;
+
+    private int lockAndDoSelect(long var1) throws IOException {
+        synchronized(this) {
+            if (!this.isOpen()) {
+                throw new ClosedSelectorException();
+            } else {
+                int var10000;
+                synchronized(this.publicKeys) {
+                    synchronized(this.publicSelectedKeys) {
+                        var10000 = this.doSelect(var1);
+                    }
+                }
+
+                return var10000;
+            }
+        }
+    }
+```
+
+macos的实现是
+
+```java
+    protected int doSelect(long var1) throws IOException {
+        boolean var3 = false;
+        if (this.closed) {
+            throw new ClosedSelectorException();
+        } else {
+            this.processDeregisterQueue();
+
+            int var7;
+            try {
+                this.begin();
+                var7 = this.kqueueWrapper.poll(var1);
+            } finally {
+                this.end();
+            }
+
+            this.processDeregisterQueue();
+            return this.updateSelectedKeys(var7);
+        }
+    }
+```
+
+sunos的实现是
+
+```java
+    protected int doSelect(long var1) throws IOException {
+        if (this.channelArray == null) {
+            throw new ClosedSelectorException();
+        } else {
+            this.processDeregisterQueue();
+
+            try {
+                this.begin();
+                this.pollWrapper.poll(this.totalChannels, 0, var1);
+            } finally {
+                this.end();
+            }
+
+            this.processDeregisterQueue();
+            int var3 = this.updateSelectedKeys();
+            if (this.pollWrapper.getReventOps(0) != 0) {
+                this.pollWrapper.putReventOps(0, 0);
+                synchronized(this.interruptLock) {
+                    IOUtil.drain(this.fd0);
+                    this.interruptTriggered = false;
+                }
+            }
+
+            return var3;
+        }
+    }
+```
+
+都是使用了poll.
+
+
+
+## Netty源码
+
+### NioEventLoopGroup
+
+> ![image-20200908112212593](https://gitee.com/wangigor/typora-images/raw/master/NioEventLoopGroup.png)
+>
+> 他是一个「**线程池**」。
+
+#### 构造
+
+```java
+//这里提供了5个重载的构造方法。
+public class NioEventLoopGroup extends MultithreadEventLoopGroup {
+
+		//默认使用处理器核的两倍线程数。
+    public NioEventLoopGroup() {
+        this(0);
+    }
+
+		//默认执行器null
+    public NioEventLoopGroup(int nEventLoops) {
+        this(nEventLoops, (Executor) null);
+    }
+
+		//使用默认提供的Selector
+    public NioEventLoopGroup(int nEventLoops, Executor executor) {
+        this(nEventLoops, executor, SelectorProvider.provider());
+    }
+
+		//自定义线程池工厂
+    public NioEventLoopGroup(int nEventLoops, ExecutorServiceFactory executorServiceFactory) {
+        this(nEventLoops, executorServiceFactory, SelectorProvider.provider());
+    }
+
+		//自定义执行器-重载调用父类
+    public NioEventLoopGroup(int nEventLoops, Executor executor, final SelectorProvider selectorProvider) {
+        super(nEventLoops, executor, selectorProvider);
+    }
+  	//自定义线程池工厂-重载调用父类
+    public NioEventLoopGroup(
+            int nEventLoops, ExecutorServiceFactory executorServiceFactory, final SelectorProvider selectorProvider) {
+        super(nEventLoops, executorServiceFactory, selectorProvider);
+    }
+}
+```
+
+父类是MultithreadEventLoopGroup「多线程时间轮询组」
+
+```java
+public abstract class MultithreadEventLoopGroup extends MultithreadEventExecutorGroup implements EventLoopGroup {
+
+    private static final int DEFAULT_EVENT_LOOP_THREADS;
+		//默认使用处理器核的两倍。
+  	//也可以通过io.netty.eventLoopThreads
+    static {
+        DEFAULT_EVENT_LOOP_THREADS = Math.max(1, SystemPropertyUtil.getInt(
+                "io.netty.eventLoopThreads", Runtime.getRuntime().availableProcessors() * 2));
+    }
+
+  	//重写的两个父类构造器
+    protected MultithreadEventLoopGroup(int nEventLoops, Executor executor, Object... args) {
+        super(nEventLoops == 0 ? DEFAULT_EVENT_LOOP_THREADS : nEventLoops, executor, args);
+    }
+    protected MultithreadEventLoopGroup(int nEventLoops,
+                                        ExecutorServiceFactory executorServiceFactory,
+                                        Object... args) {
+        super(nEventLoops == 0 ? DEFAULT_EVENT_LOOP_THREADS : nEventLoops, executorServiceFactory, args);
+    }
+}
+```
+
+父类MultithreadEventExecutorGroup「多线程事件处理器组」
+
+```java
+    //构造方法重载
+		protected MultithreadEventExecutorGroup(int nEventExecutors,
+                                            ExecutorServiceFactory executorServiceFactory,
+                                            Object... args) {
+      	//使用线程池工厂，初始化一个「线程池」
+        this(nEventExecutors, executorServiceFactory != null
+                                ? executorServiceFactory.newExecutorService(nEventExecutors)
+                                : null,
+             true, args);
+    }
+		//构造方法重载
+    protected MultithreadEventExecutorGroup(int nEventExecutors, Executor executor, Object... args) {
+        this(nEventExecutors, executor, false, args);
+    }
+
+		//构造
+    private MultithreadEventExecutorGroup(int nEventExecutors,
+                                          Executor executor,
+                                          boolean shutdownExecutor,
+                                          Object... args) {
+      	//指定线程数 校验
+        if (nEventExecutors <= 0) {
+            throw new IllegalArgumentException(
+                    String.format("nEventExecutors: %d (expected: > 0)", nEventExecutors));
+        }
+				
+      	//初始化线程池，默认的NioEventLoopGroup会走进这里
+        if (executor == null) {
+          	//默认初始化一个并行度为nEventExecutors的ForkJoinPool
+          	//指定了前缀为nioEventLoopGroup—executorId.getAndIncrement()
+          	//工作线程异常处理器使用log.error打印
+          	//异步模式为FIFO「先进先出」
+            executor = newDefaultExecutorService(nEventExecutors);
+            shutdownExecutor = true;
+        }
+				//初始化线程数组
+        children = new EventExecutor[nEventExecutors];
+      
+      	//定义线程选择策略
+      	//这里对并发度是否为2次幂的判断很巧妙
+      	//return (val & -val) == val; 因为一个数是2的n次幂，那么一定只有一位是1，后续全是0；
+      	//按位选择器更快，尽量并发度为2次幂
+        if (isPowerOfTwo(children.length)) {
+          	//采用位运算选择器 &
+            chooser = new PowerOfTwoEventExecutorChooser();
+        } else {
+          	//采用取模选择器 %
+            chooser = new GenericEventExecutorChooser();
+        }
+
+      	//初始化线程数组
+        for (int i = 0; i < nEventExecutors; i ++) {
+            boolean success = false;
+            try {
+              	//创建NioEventLoop todo
+                children[i] = newChild(executor, args);
+                success = true;
+            } catch (Exception e) {
+                // TODO: Think about if this is a good exception type
+                throw new IllegalStateException("failed to create a child event loop", e);
+            } finally {
+              	//创建失败，释放资源
+                if (!success) {
+                    for (int j = 0; j < i; j ++) {
+                        children[j].shutdownGracefully();
+                    }
+
+                    for (int j = 0; j < i; j ++) {
+                        EventExecutor e = children[j];
+                        try {
+                            while (!e.isTerminated()) {
+                                e.awaitTermination(Integer.MAX_VALUE, TimeUnit.SECONDS);
+                            }
+                        } catch (InterruptedException interrupted) {
+                            // Let the caller handle the interruption.
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        final boolean shutdownExecutor0 = shutdownExecutor;
+        final Executor executor0 = executor;
+      	//设置对关闭的监听器。为了监听每一个NioEventLoop的终止。
+        final FutureListener<Object> terminationListener = new FutureListener<Object>() {
+            @Override
+            public void operationComplete(Future<Object> future) throws Exception {
+                if (terminatedChildren.incrementAndGet() == children.length) {
+                    terminationFuture.setSuccess(null);
+                    if (shutdownExecutor0) {
+                        // This cast is correct because shutdownExecutor0 is only try if
+                        // executor0 is of type ExecutorService.
+                        ((ExecutorService) executor0).shutdown();
+                    }
+                }
+            }
+        };
+				//设置线程终止监听器。
+        for (EventExecutor e: children) {
+            e.terminationFuture().addListener(terminationListener);
+        }
+				
+      	//线程组的只读设置
+        Set<EventExecutor> childrenSet = new LinkedHashSet<EventExecutor>(children.length);
+        Collections.addAll(childrenSet, children);
+        readonlyChildren = Collections.unmodifiableSet(childrenSet);
+    }
+```
+
+
+
+### NioEventLoop
+
+> 一个「工作线程」要监听处理channel的事件。
+>
+> ![image-20200908170624068](https://gitee.com/wangigor/typora-images/raw/master/NioEventLoop.png)
+>
+> 维护了一个线程，线程启动会调用润方法，执行io任务。
+>
+> NioEventLoopGroup创建NioEventLoop是通过
+>
+> ```java
+>  @Override
+>  protected EventLoop newChild(Executor executor, Object... args) throws Exception {
+>    	//传入 NioEventLoopGroup，线程池，SelectorProvider
+>      return new NioEventLoop(this, executor, (SelectorProvider) args[0]);
+>  }
+> ```
+> 父类SingleThreadEventExecutor
+>
+> ```java
+>     //放置了任务列表和一个「本地」线程
+> 		private final Queue<Runnable> taskQueue;
+>     private volatile Thread thread;
+> ```
+>
+> 
+
+
+#### 构造
+
+```java
+    //NioEventLoop extends SingleThreadEventLoop
+		NioEventLoop(NioEventLoopGroup parent, Executor executor, SelectorProvider selectorProvider) {
+        //父构造器
+      	super(parent, executor, false);
+        if (selectorProvider == null) {
+            throw new NullPointerException("selectorProvider");
+        }
+      	//设置selectorProvider并获取selector
+        provider = selectorProvider;
+        selector = openSelector();
+    }
+		//SingleThreadEventLoop extends SingleThreadEventExecutor
+    protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor, boolean addTaskWakesUp) {
+        super(parent, executor, addTaskWakesUp);
+    }
+		//SingleThreadEventExecutor extends AbstractScheduledEventExecutor
+    protected SingleThreadEventExecutor(EventExecutorGroup parent, Executor executor, boolean addTaskWakesUp) {
+        super(parent);
+
+        if (executor == null) {
+            throw new NullPointerException("executor");
+        }
+
+        this.addTaskWakesUp = addTaskWakesUp;
+        this.executor = executor;//线程池
+        taskQueue = newTaskQueue();//任务队列 new LinkedBlockingQueue<Runnable>();
+    }
+		//AbstractScheduledEventExecutor extends AbstractEventExecutor
+    protected AbstractScheduledEventExecutor(EventExecutorGroup parent) {
+        super(parent);
+    }
+		//AbstractEventExecutor 
+		private final EventExecutorGroup parent;
+    protected AbstractEventExecutor(EventExecutorGroup parent) {
+        this.parent = parent;
+    }
+```
+
+> 这时，**线程还没有创建**。
+
+#### 添加任务addTask
+
+```java
+    protected void addTask(Runnable task) {
+        if (task == null) {
+            throw new NullPointerException("task");
+        }
+        if (isShutdown()) {
+            reject();
+        }
+      	//就是LinkedBlockingQueue的添加操作
+        taskQueue.add(task);
+    }
+```
+
+#### **启动startExecution**
+
+> 下面看一下任务执行和NioEventLoop启动。
+
+```java
+    //PausableChannelEventExecutor 
+		//在前面初始化的时候，对eventLoop进行的包裹
+		@Override
+    public void execute(Runnable command) {
+        if (!isAcceptingNewTasks()) {
+            throw new RejectedExecutionException();
+        }
+      	//执行任务
+        unwrap().execute(command);
+    }
+```
+
+```java
+		//SingleThreadEventExecutor
+		@Override
+    public void execute(Runnable task) {
+        if (task == null) {
+            throw new NullPointerException("task");
+        }
+
+        boolean inEventLoop = inEventLoop();
+      	//线程池提交的任务都是进行的addTask操作
+        if (inEventLoop) {
+            addTask(task);
+        } else {
+          	//启动
+            startExecution();
+            addTask(task);
+          	//拒绝
+            if (isShutdown() && removeTask(task)) {
+                reject();
+            }
+        }
+				
+      	//添加任务唤醒，默认是false
+      	//且task实现了NonWakeupRunnable接口，也不唤醒
+        if (!addTaskWakesUp && wakesUpForTask(task)) {
+          	//唤醒
+            wakeup(inEventLoop);
+        }
+    }
+```
+
+> 启动的入口在registry，使用用户线程提交了一个regisrty0的任务，触发startExecution。
+
+```java
+    private void startExecution() {
+      	//SingleThreadEventExecutor的state状态，通过未启动判断和cas进行修改。为启动started。
+        if (STATE_UPDATER.get(this) == ST_NOT_STARTED) {
+            if (STATE_UPDATER.compareAndSet(this, ST_NOT_STARTED, ST_STARTED)) {
+              	//添加了一个清理canneled任务的周期任务。
+                schedule(new ScheduledFutureTask<Void>(
+                        this, Executors.<Void>callable(new PurgeTask(), null),
+                        ScheduledFutureTask.deadlineNanos(SCHEDULE_PURGE_INTERVAL), -SCHEDULE_PURGE_INTERVAL));
+                scheduleExecution();
+            }
+        }
+    }
+    protected final void scheduleExecution() {
+        updateThread(null); //把当前NioEventLoop的Thread属性置为null
+        executor.execute(asRunnable);//使用线程池执行
+      	//这里的executor是并发度为nEventLoops的ForkJoinPool「netty自己的forkjoinpool」
+    }
+    private final Runnable asRunnable = new Runnable() {
+        @Override
+        public void run() {
+          	//设置为forkjoin线程nioEventLoopGroup-0-0
+            updateThread(Thread.currentThread());
+
+            // lastExecutionTime must be set on the first run
+            // in order for shutdown to work correctly for the
+            // rare case that the eventloop did not execute
+            // a single task during its lifetime.
+            if (firstRun) {
+                firstRun = false;
+                updateLastExecutionTime();
+            }
+
+            try {
+              	//启动
+                SingleThreadEventExecutor.this.run();
+            } catch (Throwable t) {
+                logger.warn("Unexpected exception from an event executor: ", t);
+                cleanupAndTerminate(false);
+            }
+        }
+    };
+```
+>
+
+
+```java
+    //NioEventLoop
+		//可以看到这是一个周期性的递归调用select方法，当前执行完又回到scheduleExecution()
+		protected void run() {
+      	//这里wakenUp是防止多次执行selector.wakeup()的开销
+        boolean oldWakenUp = wakenUp.getAndSet(false);
+        try {
+          	//如果有等待任务，就执行非阻塞select，分出更多的时间执行等待任务。
+            if (hasTasks()) {
+                selectNow(); //非阻塞的select，没有io事件就返回o
+            } else {
+                select(oldWakenUp);//阻塞等待
+              	//阻塞时间根据周期队列scheduledTaskQueue的执行时间而定。
+              	//如果队列为空，默认等待1s
+
+                if (wakenUp.get()) {//这里是看是否被外部唤醒，如果被外部唤醒了就唤醒select上的等待线程
+                  									//比如 添加任务execute(task)就会唤醒。
+                    selector.wakeup();
+                }
+            }
+
+            cancelledKeys = 0;
+            needsToSelectAgain = false;
+            final int ioRatio = this.ioRatio;	//这里是io比例。也就是处理io操作「processSelectedKeys()」和执行任务「runAllTasks()所占的比例」
+          	//默认是50
+            if (ioRatio == 100) {
+                processSelectedKeys();
+                runAllTasks();
+            } else {
+                final long ioStartTime = System.nanoTime();
+
+                processSelectedKeys();
+
+                final long ioTime = System.nanoTime() - ioStartTime;//记录io执行耗时，计算任务执行耗时。
+                runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
+            }
+
+            if (isShuttingDown()) {
+                closeAll();
+                if (confirmShutdown()) {
+                    cleanupAndTerminate(true);
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            logger.warn("Unexpected exception in the selector loop.", t);
+
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                // Ignore.
+            }
+        }
+				//进入下一个周期操作。
+        scheduleExecution();
+    }
+```
+
+##### 执行任务 runAllTasks
+
+> 只看runAllTasks()就行，另外一个带timeoutNanos参数的是要计算在当前时间内完成执行，超时就不执行「新poll的」task了。
+
+```java
+//从taskQueue队列中取出任务逐个执行
+protected boolean runAllTasks() {
+  	//scheduledTaskQueue队列中的任务先合并到taskQueue中。
+    fetchFromScheduledTaskQueue();
+  
+  	//先尝试拉一个。要是一个都没有就不进行了。
+    Runnable task = pollTask();
+    if (task == null) {
+        return false;
+    }
+		
+  	//再执行，再拉。
+    for (;;) {
+        try {
+            task.run();
+        } catch (Throwable t) {
+            logger.warn("A task raised an exception.", t);
+        }
+
+        task = pollTask();
+        if (task == null) {
+            lastExecutionTime = ScheduledFutureTask.nanoTime();
+            return true;
+        }
+    }
+}
+```
+
+##### 处理io processSelectedKeys
+
+```java
+    private void processSelectedKeys() {
+        if (selectedKeys != null) {
+          	//有selectedKeys，就直接flip可读之后，逐条执行。
+          	//没有连接的时候，这里是size=0，而不是null。
+          	//有连接进来，创建完channel之后，就会有新的事件。
+            processSelectedKeysOptimized(selectedKeys.flip());
+        } else {
+          	//是null，就现获取selectedKeys
+            processSelectedKeysPlain(selector.selectedKeys());
+        }
+    }
+```
+
+> 当有连接进来时。
+
+```java
+private void processSelectedKeysOptimized(SelectionKey[] selectedKeys) {
+    for (int i = 0;; i ++) {
+        final SelectionKey k = selectedKeys[i];
+        if (k == null) {
+            break;
+        }
+        // null out entry in the array to allow to have it GC'ed once the Channel close
+        // See https://github.com/netty/netty/issues/2363
+        selectedKeys[i] = null;//相当于help gc
+				
+      	//这里就是新建的NioServerSocketChannel实例
+        final Object a = k.attachment();
+
+      	//进入处理逻辑
+        if (a instanceof AbstractNioChannel) {
+            processSelectedKey(k, (AbstractNioChannel) a);
+        } else {
+            @SuppressWarnings("unchecked")
+            NioTask<SelectableChannel> task = (NioTask<SelectableChannel>) a;
+            processSelectedKey(k, task);
+        }
+
+        if (needsToSelectAgain) {
+            // null out entries in the array to allow to have it GC'ed once the Channel close
+            // See https://github.com/netty/netty/issues/2363
+            for (;;) {
+                if (selectedKeys[i] == null) {
+                    break;
+                }
+                selectedKeys[i] = null;
+                i++;
+            }
+
+            selectAgain();
+            // Need to flip the optimized selectedKeys to get the right reference to the array
+            // and reset the index to -1 which will then set to 0 on the for loop
+            // to start over again.
+            //
+            // See https://github.com/netty/netty/issues/1523
+            selectedKeys = this.selectedKeys.flip();
+            i = -1;
+        }
+    }
+}
+```
+> debug一下
+>
+> ![image-20200916145342606](https://gitee.com/wangigor/typora-images/raw/master/netty-processSelectedKey-debug.png)
+
+```java
+    private static void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
+        final AbstractNioChannel.NioUnsafe unsafe = ch.unsafe();
+        if (!k.isValid()) {
+            // key不可用，直接关闭通道。
+            unsafe.close(unsafe.voidPromise());
+            return;
+        }
+				
+        try {
+          	//查看当前通道事件
+          	//    public static final int OP_READ = 1 << 0; 读 1
+    				//		public static final int OP_WRITE = 1 << 2; 写 4
+    				//		public static final int OP_CONNECT = 1 << 3; 连接 8
+    				//		public static final int OP_ACCEPT = 1 << 4; 接受 16
+            int readyOps = k.readyOps();
+            //读 或者 接收
+            if ((readyOps & (SelectionKey.OP_READ | SelectionKey.OP_ACCEPT)) != 0 || readyOps == 0) {
+                unsafe.read();
+                if (!ch.isOpen()) {
+                    return;
+                }
+            }
+          	//写
+            if ((readyOps & SelectionKey.OP_WRITE) != 0) {
+                ch.unsafe().forceFlush();
+            }
+          	//连接
+            if ((readyOps & SelectionKey.OP_CONNECT) != 0) {
+                int ops = k.interestOps();
+                ops &= ~SelectionKey.OP_CONNECT;
+                k.interestOps(ops);
+
+                unsafe.finishConnect();
+            }
+        } catch (CancelledKeyException ignored) {
+            unsafe.close(unsafe.voidPromise());
+        }
+    }
+```
+
+### ServerBootstrap、Bootstrap
+
+> ServerBootstrap和Bootstrap作为服务端和客户端的启动类，都继承自AbstractBootstrap。
+>
+> 都进行了group、channel、childHandler/handler、option、connect/bind、sync、channelFuture.channel().closeFuture().sync()的操作。
+>
+> **建造者模式。**
+
+AbstractBootstrap
+
+```java
+    //对于客户端，这个是消息发送接收的线程池
+		//对于服务端，这个是处理客户端连接请求的线程池
+		private volatile EventLoopGroup group;
+		//channel工厂，通过传入的channel类型反射获取工厂
+    private volatile ChannelFactory<? extends C> channelFactory;
+		//socket地址
+    private volatile SocketAddress localAddress;
+		//channel的配置信息
+    private final Map<ChannelOption<?>, Object> options = new LinkedHashMap<ChannelOption<?>, Object>();
+    private final Map<AttributeKey<?>, Object> attrs = new LinkedHashMap<AttributeKey<?>, Object>();
+		//io事件处理器
+    private volatile ChannelHandler handler;
+```
+
+ServerBootstrap
+
+私有成员
+
+```java
+    //都是对于workerGroup。
+		//因为服务端比客户端多一套loopGroup用于处理「业务」，父类的处理「连接请求」
+		//所以也就能看到在demo的使用上，handler服务端的设置的是childHandler。
+		private final Map<ChannelOption<?>, Object> childOptions = new LinkedHashMap<ChannelOption<?>, Object>();
+    private final Map<AttributeKey<?>, Object> childAttrs = new LinkedHashMap<AttributeKey<?>, Object>();
+    private volatile EventLoopGroup childGroup;
+    private volatile ChannelHandler childHandler;
+```
+
+Bootstrap
+
+私有成员
+
+```java
+		//名称解析器组合socket地址
+		private static final NameResolverGroup<?> DEFAULT_RESOLVER = DefaultNameResolverGroup.INSTANCE;
+    private volatile NameResolverGroup<SocketAddress> resolver = (NameResolverGroup<SocketAddress>) DEFAULT_RESOLVER;
+    private volatile SocketAddress remoteAddress;
+```
+
+- group设置NioEventLoopGroup
+
+> ServerBootstrap有差异，重载了父类的group
+
+**super.group**
+
+```java
+public B group(EventLoopGroup group) {
+  	//非空检验
+    if (group == null) {
+        throw new NullPointerException("group");
+    }
+    if (this.group != null) {
+        throw new IllegalStateException("group set already");
+    }
+  	//填上属性
+    this.group = group;
+    return (B) this;
+}
+```
+
+ServerBootstrap重载方法
+
+```java
+public ServerBootstrap group(EventLoopGroup parentGroup, EventLoopGroup childGroup) {
+  	//处理客户端连接请求的放在父类「acceptor」
+    super.group(parentGroup);
+    if (childGroup == null) {
+        throw new NullPointerException("childGroup");
+    }
+    if (this.childGroup != null) {
+        throw new IllegalStateException("childGroup set already");
+    }
+  	//处理业务的放在子类
+    this.childGroup = childGroup;
+    return this;
+}
+```
+
+- channel
+
+> channel方法一样，都是通过传进来的channel类型，反射得到对应的channel工厂。
+
+```java
+//获得channel工厂。
+public B channel(Class<? extends C> channelClass) {
+    if (channelClass == null) {
+        throw new NullPointerException("channelClass");
+    }
+    return channelFactory(new ReflectiveChannelFactory<C>(channelClass));
+}
+
+//放置属性
+public B channelFactory(ChannelFactory<? extends C> channelFactory) {
+    if (channelFactory == null) {
+        throw new NullPointerException("channelFactory");
+    }
+    if (this.channelFactory != null) {
+        throw new IllegalStateException("channelFactory set already");
+    }
+
+    this.channelFactory = channelFactory;
+    return (B) this;
+}
+```
+
+ReflectiveChannelFactory这个工厂很简单
+
+```java
+public class ReflectiveChannelFactory<T extends Channel> implements ChannelFactory<T> {
+		
+  	//就是保存了class，通过newInstance创建实例
+    private final Class<? extends T> clazz;
+
+    public ReflectiveChannelFactory(Class<? extends T> clazz) {
+        if (clazz == null) {
+            throw new NullPointerException("clazz");
+        }
+        this.clazz = clazz;
+    }
+
+    @Override
+    public T newChannel() {
+        try {
+          	//创建channel实例
+            return clazz.newInstance();
+        } catch (Throwable t) {
+            throw new ChannelException("Unable to create Channel from class " + clazz, t);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return StringUtil.simpleClassName(clazz) + ".class";
+    }
+}
+```
+
+- handler
+
+> channelHandler用于处理我们的业务逻辑，基于Pipeline的自定义handler机制
+>
+> ![img](https://gitee.com/wangigor/typora-images/raw/master/channelHandler.jpg)
+
+```java
+//通道初始化的模板类
+//这个类下面会进行详细展开
+@Sharable
+public abstract class ChannelInitializer<C extends Channel> extends ChannelHandlerAdapter {
+
+  	//供子类实现的初始化通道方法
+  	//添加channelHandler
+    protected abstract void initChannel(C ch) throws Exception;
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public final void channelRegistered(ChannelHandlerContext ctx) throws Exception {
+        ChannelPipeline pipeline = ctx.pipeline();
+        boolean success = false;
+        try {
+            initChannel((C) ctx.channel());
+            pipeline.remove(this);
+            ctx.fireChannelRegistered();
+            success = true;
+        } catch (Throwable t) {
+            logger.warn("Failed to initialize a channel. Closing: " + ctx.channel(), t);
+        } finally {
+            if (pipeline.context(this) != null) {
+                pipeline.remove(this);
+            }
+            if (!success) {
+                ctx.close();
+            }
+        }
+    }
+}
+```
+
+> 通道pipeline初始化的时候，会初始化固定的**head**和**tail**节点。
+>
+> ```java
+> DefaultChannelPipeline(AbstractChannel channel) {
+>     if (channel == null) {
+>         throw new NullPointerException("channel");
+>     }
+>     this.channel = channel;
+> 
+>     tail = new TailContext(this);
+>     head = new HeadContext(this);
+> 
+>     head.next = tail;
+>     tail.prev = head;
+> }
+> ```
+>
+> 中间可以初始化自己的ChannelHandler，组成**双向链表**。
+
+> TailContext提供了兜底的异常捕获、信息处理等方案。用户线程是从tail开始操作。
+
+```java
+    static final class TailContext extends AbstractChannelHandlerContext implements ChannelHandler {
+        private static final int SKIP_FLAGS = skipFlags0(TailContext.class);
+        private static final String TAIL_NAME = generateName0(TailContext.class);
+
+        TailContext(DefaultChannelPipeline pipeline) {
+            super(pipeline, null, TAIL_NAME, SKIP_FLAGS);
+        }
+
+        @Override
+        public ChannelHandler handler() {
+            return this;
+        }
+
+        @Override
+        public void channelRegistered(ChannelHandlerContext ctx) throws Exception { }
+
+        @Override
+        public void channelUnregistered(ChannelHandlerContext ctx) throws Exception { }
+
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception { }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception { }
+
+        @Override
+        public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception { }
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception { }
+
+      
+      	//提供默认异常处理
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            logger.warn(
+                    "An exceptionCaught() event was fired, and it reached at the tail of the pipeline. " +
+                            "It usually means the last handler in the pipeline did not handle the exception.", cause);
+        }
+				
+      	//默认的通道未读信息释放
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+            try {
+                logger.debug(
+                        "Discarded inbound message {} that reached at the tail of the pipeline. " +
+                                "Please check your pipeline configuration.", msg);
+            } finally {
+                ReferenceCountUtil.release(msg);
+            }
+        }
+
+        @Override
+        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception { }
+
+        @Skip
+        @Override
+        public void handlerAdded(ChannelHandlerContext ctx) throws Exception { }
+
+        @Skip
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception { }
+
+      
+      	//交给pipeline操作
+      
+        @Skip
+        @Override
+        public void bind(ChannelHandlerContext ctx, SocketAddress localAddress, ChannelPromise promise)
+                throws Exception {
+            ctx.bind(localAddress, promise);
+        }
+
+        @Skip
+        @Override
+        public void connect(ChannelHandlerContext ctx, SocketAddress remoteAddress,
+                            SocketAddress localAddress, ChannelPromise promise) throws Exception {
+            ctx.connect(remoteAddress, localAddress, promise);
+        }
+
+        @Skip
+        @Override
+        public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+            ctx.disconnect(promise);
+        }
+
+        @Skip
+        @Override
+        public void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+            ctx.close(promise);
+        }
+
+        @Skip
+        @Override
+        public void deregister(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+            ctx.deregister(promise);
+        }
+
+        @Skip
+        @Override
+        public void read(ChannelHandlerContext ctx) throws Exception {
+            ctx.read();
+        }
+
+        @Skip
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+            ctx.write(msg, promise);
+        }
+
+        @Skip
+        @Override
+        public void flush(ChannelHandlerContext ctx) throws Exception {
+            ctx.flush();
+        }
+    }
+```
+
+
+
+> head节点，提供了netty底层操作事件触发、unsafe操作等。head更「远离」用户线程
+
+```java
+    static final class HeadContext extends AbstractChannelHandlerContext implements ChannelHandler {
+        private static final int SKIP_FLAGS = skipFlags0(HeadContext.class);
+        private static final String HEAD_NAME = generateName0(HeadContext.class);
+
+        private final Unsafe unsafe;
+
+        HeadContext(DefaultChannelPipeline pipeline) {
+            super(pipeline, null, HEAD_NAME, SKIP_FLAGS);
+            unsafe = pipeline.channel().unsafe();
+        }
+
+        @Override
+        public ChannelHandler handler() {
+            return this;
+        }
+      
+      	//底层操作相关
+
+        @Override
+        public void bind(
+                ChannelHandlerContext ctx, SocketAddress localAddress, ChannelPromise promise)
+                throws Exception {
+            unsafe.bind(localAddress, promise);
+        }
+
+        @Override
+        public void connect(
+                ChannelHandlerContext ctx,
+                SocketAddress remoteAddress, SocketAddress localAddress,
+                ChannelPromise promise) throws Exception {
+            unsafe.connect(remoteAddress, localAddress, promise);
+        }
+
+        @Override
+        public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+            unsafe.disconnect(promise);
+        }
+
+        @Override
+        public void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+            unsafe.close(promise);
+        }
+
+        @Override
+        public void deregister(ChannelHandlerContext ctx, final ChannelPromise promise) throws Exception {
+            assert !((PausableEventExecutor) ctx.channel().eventLoop()).isAcceptingNewTasks();
+
+            // submit deregistration task
+            ctx.channel().eventLoop().unwrap().execute(new OneTimeTask() {
+                @Override
+                public void run() {
+                    unsafe.deregister(promise);
+                }
+            });
+        }
+
+        @Override
+        public void read(ChannelHandlerContext ctx) {
+            unsafe.beginRead();
+        }
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+            unsafe.write(msg, promise);
+        }
+
+        @Override
+        public void flush(ChannelHandlerContext ctx) throws Exception {
+            unsafe.flush();
+        }
+
+        @Skip
+        @Override
+        public void handlerAdded(ChannelHandlerContext ctx) throws Exception { }
+
+        @Skip
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception { }
+
+      
+      	//事件触发相关
+        @Skip
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+            ctx.fireExceptionCaught(cause);
+        }
+
+        @Skip
+        @Override
+        public void channelRegistered(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelRegistered();
+        }
+
+        @Skip
+        @Override
+        public void channelUnregistered(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelUnregistered();
+        }
+
+        @Skip
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelActive();
+        }
+
+        @Skip
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelInactive();
+        }
+
+        @Skip
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+            ctx.fireChannelRead(msg);
+        }
+
+        @Skip
+        @Override
+        public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelReadComplete();
+        }
+
+        @Skip
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+            ctx.fireUserEventTriggered(evt);
+        }
+
+        @Skip
+        @Override
+        public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+            ctx.fireChannelWritabilityChanged();
+        }
+    }
+```
+
+> 那下面看一下用户线程如何进行添加自定的handler。
+>
+> 要从demo的匿名内部类ChannelInitializer添加开始看。
+>
+> ```java
+> .handler(new ChannelInitializer<SocketChannel>() {
+> 	@Override
+> 	protected void initChannel(SocketChannel ch) throws Exception {
+> 		ch.pipeline().addLast(new SimpleNettyClientHandler());
+> 	}
+> });
+> ```
+> 这里只是新建匿名内部类放在handler中。
+>
+> 在channel创建的时候，会创建一个新的pipeline与channel对应。
+>
+> ```java
+> protected AbstractChannel(Channel parent) {
+> 		this.parent = parent;
+> 		id = DefaultChannelId.newInstance();
+> 		unsafe = newUnsafe();
+> 		pipeline = new DefaultChannelPipeline(this);//一个channel对应一个pipeline
+> }
+> ```
+> channel初始化的时候，会把handler逐一添加到pipeline中。
+>
+> ```java
+> ChannelPipeline p = channel.pipeline();
+> if (handler() != null) {
+> p.addLast(handler());
+> }
+> ```
+>
+>
+> ```java
+> @Override
+> public ChannelPipeline addLast(ChannelHandler... handlers) {
+> 	//每个handler添加都会进这里。
+> 	//也可以添加多个。
+>  return addLast((ChannelHandlerInvoker) null, handlers);
+> }
+> 
+> @Override
+> public ChannelPipeline addLast(EventExecutorGroup group, ChannelHandler... handlers) {
+>  if (handlers == null) {
+>      throw new NullPointerException("handlers");
+>  }
+> 		//简单循环。逐条添加。
+>  for (ChannelHandler h: handlers) {
+>      if (h == null) {
+>          break;
+>      }
+>      addLast(group, generateName(h), h);
+>  }
+> 
+>  return this;
+> }
+> ```
+>
+> 具体添加
+>
+> ```java
+> @Override
+> public ChannelPipeline addLast(EventExecutorGroup group, String name, ChannelHandler handler) {
+> 	//锁pipeline
+>  synchronized (this) {
+>    	//名称校验 默认是StringUtil.simpleClassName(className) + "#0"
+>    	//会放入nameCaches的WeakHashMap中
+>    	//重名会报 new IllegalArgumentException("Duplicate handler name: " + name);异常
+>      name = filterName(name, handler);
+>    	//把每一个handler用包装成context
+>    	//group一般是空
+>      addLast0(name, new DefaultChannelHandlerContext(this, findInvoker(group), name, handler));
+>  }
+>  return this;
+> }
+> ```
+>
+> addLast0
+>
+> ```java
+> private void addLast0(final String name, AbstractChannelHandlerContext newCtx) {
+>  //检查重复项
+>  //当前handler的added状态是否为true 且 没有被@Sharable标注
+>  checkMultiplicity(newCtx);
+> 
+>  //插入tail之前
+>  //双向链表插入
+>  AbstractChannelHandlerContext prev = tail.prev;
+>  newCtx.prev = prev;
+>  newCtx.next = tail;
+>  prev.next = newCtx;
+>  tail.prev = newCtx;
+> 
+>  name2ctx.put(name, newCtx);
+> 
+>  //执行添加完成的回调
+>  callHandlerAdded(newCtx);
+> }
+> ```
+> ```java
+>     private void callHandlerAdded(final AbstractChannelHandlerContext ctx) {
+>       
+>         if ((ctx.skipFlags & AbstractChannelHandlerContext.MASK_HANDLER_ADDED) != 0) {
+>             return;
+>         }
+> 				
+>       	//这里还是查看当前线程是否是线程池线程。
+>       	//否则放入线程池操作
+>         if (ctx.channel().isRegistered() && !ctx.executor().inEventLoop()) {
+>             ctx.executor().execute(new Runnable() {
+>                 @Override
+>                 public void run() {
+>                     callHandlerAdded0(ctx);
+>                 }
+>             });
+>             return;
+>         }
+>       	//就是添加完成的通知
+>         callHandlerAdded0(ctx);
+>     }
+> ```
+>
+> 在channel初始化的register阶段，会调用channelHandler的channelRegistered方法。
+>
+> ```java
+> //ChannelInitializer重写了这个方法
+> @Override
+> @SuppressWarnings("unchecked")
+> public final void channelRegistered(ChannelHandlerContext ctx) throws Exception {
+>     ChannelPipeline pipeline = ctx.pipeline();
+>     boolean success = false;
+>     try {
+>       	//把自己实现的子类initChannel添加进来的自定义handler，添加到channel中。
+>         initChannel((C) ctx.channel());
+>       	//删除自己 
+>         pipeline.remove(this);
+>       	//触发每一个handler的通道注册成功操作
+>         ctx.fireChannelRegistered();
+>         success = true;
+>     } catch (Throwable t) {
+>         logger.warn("Failed to initialize a channel. Closing: " + ctx.channel(), t);
+>     } finally {
+>         if (pipeline.context(this) != null) {
+>             pipeline.remove(this);
+>         }
+>         if (!success) {
+>             ctx.close();
+>         }
+>     }
+> }
+> ```
+
+handler删除可以做一些事情，比如**权限认证**。
+
+比如
+
+```java
+//在channel建立之初，first添加一个鉴权的handler。
+//客户端建立连接完，第一步先发送password，进行校验。
+//校验成功，就删除这个handler，当前channel安全。
+//不成功，关闭。
+public class AuthHandler extends ChannelHandlerAdapter {
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object password) throws Exception {
+        if (pass((ByteBuf) password)) {
+            ctx.pipeline().remove(this);
+        } else {
+            ctx.close();
+        }
+    }
+
+    private boolean pass(ByteBuf password) {
+        //业务逻辑
+        return true;
+    }
+}
+```
+
+
+- option
+
+> 通道可选「TCP参数」属性
+>
+> ```java
+>     public static final ChannelOption<ByteBufAllocator> ALLOCATOR = valueOf("ALLOCATOR");
+>     public static final ChannelOption<RecvByteBufAllocator> RCVBUF_ALLOCATOR = valueOf("RCVBUF_ALLOCATOR");
+>     public static final ChannelOption<MessageSizeEstimator> MESSAGE_SIZE_ESTIMATOR = valueOf("MESSAGE_SIZE_ESTIMATOR");
+> 
+>     public static final ChannelOption<Integer> CONNECT_TIMEOUT_MILLIS = valueOf("CONNECT_TIMEOUT_MILLIS");
+>     public static final ChannelOption<Integer> MAX_MESSAGES_PER_READ = valueOf("MAX_MESSAGES_PER_READ");
+>     public static final ChannelOption<Integer> WRITE_SPIN_COUNT = valueOf("WRITE_SPIN_COUNT");
+>     public static final ChannelOption<Integer> WRITE_BUFFER_HIGH_WATER_MARK = valueOf("WRITE_BUFFER_HIGH_WATER_MARK");
+>     public static final ChannelOption<Integer> WRITE_BUFFER_LOW_WATER_MARK = valueOf("WRITE_BUFFER_LOW_WATER_MARK");
+> 
+>     public static final ChannelOption<Boolean> ALLOW_HALF_CLOSURE = valueOf("ALLOW_HALF_CLOSURE");
+>     public static final ChannelOption<Boolean> AUTO_READ = valueOf("AUTO_READ");
+> 
+>     public static final ChannelOption<Boolean> SO_BROADCAST = valueOf("SO_BROADCAST");
+>     public static final ChannelOption<Boolean> SO_KEEPALIVE = valueOf("SO_KEEPALIVE");
+>     public static final ChannelOption<Integer> SO_SNDBUF = valueOf("SO_SNDBUF");
+>     public static final ChannelOption<Integer> SO_RCVBUF = valueOf("SO_RCVBUF");
+>     public static final ChannelOption<Boolean> SO_REUSEADDR = valueOf("SO_REUSEADDR");
+>     public static final ChannelOption<Integer> SO_LINGER = valueOf("SO_LINGER");
+>     public static final ChannelOption<Integer> SO_BACKLOG = valueOf("SO_BACKLOG");
+>     public static final ChannelOption<Integer> SO_TIMEOUT = valueOf("SO_TIMEOUT");
+> 
+>     public static final ChannelOption<Integer> IP_TOS = valueOf("IP_TOS");
+>     public static final ChannelOption<InetAddress> IP_MULTICAST_ADDR = valueOf("IP_MULTICAST_ADDR");
+>     public static final ChannelOption<NetworkInterface> IP_MULTICAST_IF = valueOf("IP_MULTICAST_IF");
+>     public static final ChannelOption<Integer> IP_MULTICAST_TTL = valueOf("IP_MULTICAST_TTL");
+>     public static final ChannelOption<Boolean> IP_MULTICAST_LOOP_DISABLED = valueOf("IP_MULTICAST_LOOP_DISABLED");
+> 
+>     public static final ChannelOption<Boolean> TCP_NODELAY = valueOf("TCP_NODELAY");
+> ```
+>
+> 
+
+```java
+    public <T> B option(ChannelOption<T> option, T value) {
+        if (option == null) {
+            throw new NullPointerException("option");
+        }
+        if (value == null) { //删除属性
+            synchronized (options) {
+                options.remove(option);
+            }
+        } else {	//添加属性
+            synchronized (options) {
+                options.put(option, value);
+            }
+        }
+        return (B) this;
+    }
+```
+
+
+
+- bind
+
+> 
+>
+> 「**服务端**」在bind步骤之前，我们已经做好了，设置线程组、指定通道类型、自定义通道初始化器、指定通道参数等操作。
+
+```java
+    //绑定本地端口
+		public ChannelFuture bind(int inetPort) {
+        return bind(new InetSocketAddress(inetPort));
+    }
+		//重载方法
+    public ChannelFuture bind(SocketAddress localAddress) {
+      	//参数校验
+        validate();
+        if (localAddress == null) {
+            throw new NullPointerException("localAddress");
+        }
+        return doBind(localAddress);
+    }
+
+    private ChannelFuture doBind(final SocketAddress localAddress) {
+      	
+      	//初始化和注册
+        final ChannelFuture regFuture = initAndRegister();
+        final Channel channel = regFuture.channel();
+        if (regFuture.cause() != null) {
+            return regFuture;
+        }
+				//初始化和注册成功
+        if (regFuture.isDone()) {
+            // At this point we know that the registration was complete and successful.
+            ChannelPromise promise = channel.newPromise();
+            doBind0(regFuture, channel, localAddress, promise); //进行doBind0操作
+            return promise;
+        } else {
+          	//否则对上一步的promise添加成功监听器
+          	//监听到成功后，再doBind0
+          	//doBind0才是NioEventLoop线程的启动
+            // Registration future is almost always fulfilled already, but just in case it's not.
+            final PendingRegistrationPromise promise = new PendingRegistrationPromise(channel);
+            regFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    Throwable cause = future.cause();
+                    if (cause != null) {
+                        // Registration on the EventLoop failed so fail the ChannelPromise directly to not cause an
+                        // IllegalStateException once we try to access the EventLoop of the Channel.
+                        promise.setFailure(cause);
+                    } else {
+                        // Registration was successful, so set the correct executor to use.
+                        // See https://github.com/netty/netty/issues/2586
+                        promise.executor = channel.eventLoop();
+                    }
+                    doBind0(regFuture, channel, localAddress, promise);
+                }
+            });
+            return promise;
+        }
+    }
+```
+
+```java
+    //初始化和注册
+		final ChannelFuture initAndRegister() {
+      	//使用通道工厂，初始化一个channel「NioServerSocketChannel」
+      	//newInstance  
+        final Channel channel = channelFactory().newChannel();
+        try {
+          	//初始化通道
+            init(channel);
+        } catch (Throwable t) {
+          	//失败，强制退出
+            channel.unsafe().closeForcibly();
+          	//并手动调用GlobalEventExecutor全局事件处理器告知失败。
+            // as the Channel is not registered yet we need to force the usage of the GlobalEventExecutor
+            return new DefaultChannelPromise(channel, GlobalEventExecutor.INSTANCE).setFailure(t);
+        }
+				
+      	//注册到bossGroup中
+        ChannelFuture regFuture = group().register(channel);
+        if (regFuture.cause() != null) {
+            if (channel.isRegistered()) {
+                channel.close();
+            } else {
+                channel.unsafe().closeForcibly();
+            }
+        }
+
+        // If we are here and the promise is not failed, it's one of the following cases:
+        // 1) If we attempted registration from the event loop, the registration has been completed at this point.
+        //    i.e. It's safe to attempt bind() or connect() now because the channel has been registered.
+        // 2) If we attempted registration from the other thread, the registration request has been successfully
+        //    added to the event loop's task queue for later execution.
+        //    i.e. It's safe to attempt bind() or connect() now:
+        //         because bind() or connect() will be executed *after* the scheduled registration task is executed
+        //         because register(), bind(), and connect() are all bound to the same thread.
+
+        return regFuture;
+    }
+```
+
+> 服务端的通道初始化
+
+```java
+    void init(Channel channel) throws Exception {
+      	//设置option
+        final Map<ChannelOption<?>, Object> options = options();
+        synchronized (options) {
+            channel.config().setOptions(options);
+        }
+			
+      	//设置attr
+        final Map<AttributeKey<?>, Object> attrs = attrs();
+        synchronized (attrs) {
+            for (Entry<AttributeKey<?>, Object> e: attrs.entrySet()) {
+                @SuppressWarnings("unchecked")
+                AttributeKey<Object> key = (AttributeKey<Object>) e.getKey();
+                channel.attr(key).set(e.getValue());
+            }
+        }
+				
+      	//设置服务端bossworker的通道初始化器
+      	//demo中没有
+        ChannelPipeline p = channel.pipeline();
+        if (handler() != null) {
+            p.addLast(handler());
+        }
+
+      	//把跟workerGroup相关的child「属性」组成成ServerBootstrapAcceptor  
+      	//这个ServerBootstrapAcceptor是为了接受通道连接/转换用的，bossGroup通过这个handler,把注册上来的channel注册到workerGroup上。
+      	//放在在pipeline中
+        final EventLoopGroup currentChildGroup = childGroup;
+        final ChannelHandler currentChildHandler = childHandler;
+        final Entry<ChannelOption<?>, Object>[] currentChildOptions;
+        final Entry<AttributeKey<?>, Object>[] currentChildAttrs;
+        synchronized (childOptions) {
+            currentChildOptions = childOptions.entrySet().toArray(newOptionArray(childOptions.size()));
+        }
+        synchronized (childAttrs) {
+            currentChildAttrs = childAttrs.entrySet().toArray(newAttrArray(childAttrs.size()));
+        }
+
+        p.addLast(new ChannelInitializer<Channel>() {
+            @Override
+            public void initChannel(Channel ch) throws Exception {
+                ch.pipeline().addLast(new ServerBootstrapAcceptor(
+                        currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
+            }
+        });
+    }
+```
+
+> 通道注册
+>
+> 通道注册，netty使用了一个隔离接口Unsafe「invoker、localAddress、remoteAddress、closeForcibly、register、deregister、voidPromise」，对业务系统比如read、write，进行隔离。
+
+```java
+//调用NioEventLoopGroup「boss」的register方法
+ChannelFuture regFuture = group().register(channel);
+```
+
+```java
+		//MultithreadEventLoopGroup
+		@Override
+    public ChannelFuture register(Channel channel) {
+      	//next()就是通过loopGroup的chooser「二进制选择器」,获取到一个NioEventLoop「线程」
+        return next().register(channel);
+    }
+```
+
+```java
+    //super SingleThreadEventLoop
+		@Override
+    public ChannelFuture register(Channel channel) {
+      	//生成了一个默认的DefaultChannelPromise用于返回ChannelFuture
+        return register(channel, new DefaultChannelPromise(channel, this));
+    }
+    @Override
+    public ChannelFuture register(final Channel channel, final ChannelPromise promise) {
+      	//参数检查
+        if (channel == null) {
+            throw new NullPointerException("channel");
+        }
+        if (promise == null) {
+            throw new NullPointerException("promise");
+        }
+				
+      	//调用了通道隔离的register方法
+      	//这里的channel是server指定的NioServerSocketChannel，他在初始化的时候，会初始化一个NioMessageUnsafe座位unsafe，进行channel操作的隔离。
+        channel.unsafe().register(this, promise);
+        return promise;
+    }
+```
+
+```java
+				//AbstractChannel
+				@Override
+        public final void register(EventLoop eventLoop, final ChannelPromise promise) {
+          	//参数检查
+            if (eventLoop == null) {
+                throw new NullPointerException("eventLoop");
+            }
+            if (promise == null) {
+                throw new NullPointerException("promise");
+            }
+            if (isRegistered()) {
+                promise.setFailure(new IllegalStateException("registered to an event loop already"));
+                return;
+            }
+            if (!isCompatible(eventLoop)) {
+                promise.setFailure(
+                        new IllegalStateException("incompatible event loop type: " + eventLoop.getClass().getName()));
+                return;
+            }
+
+            //对eventLoop进行包装
+            if (AbstractChannel.this.eventLoop == null) {
+                AbstractChannel.this.eventLoop = new PausableChannelEventLoop(eventLoop);//包装后的eventLoop
+            } else {
+                AbstractChannel.this.eventLoop.unwrapped = eventLoop; //NioEventLoop
+            }
+						
+          	//判断Thread.currentThread当前线程是否是NioEventLoop的线程池线程
+            if (eventLoop.inEventLoop()) {
+              	//如果是，就直接当前线程执行register0操作
+                register0(promise);
+            } else {
+              	//否则提交线程池操作
+              	//因为我们是从业务线程进行的bind操作，所以肯定走这里。
+                try {
+                    eventLoop.execute(new OneTimeTask() {
+                        @Override
+                        public void run() {
+                            register0(promise);
+                        }
+                    });
+                } catch (Throwable t) {
+                    logger.warn(
+                            "Force-closing a channel whose registration task was not accepted by an event loop: {}",
+                            AbstractChannel.this, t);
+                    closeForcibly();
+                    closeFuture.setClosed();
+                    safeSetFailure(promise, t);
+                }
+            }
+        }
+```
+
+```java
+private void register0(ChannelPromise promise) {
+    try {
+        //检查这个promise，如果设置为不可取消失败了，或者不是打开的，直接返回
+        if (!promise.setUncancellable() || !ensureOpen(promise)) {
+            return;
+        }
+      	//如果channel没有注册过，就是true，反之false
+        boolean firstRegistration = neverRegistered;
+        doRegister(); //注册
+        neverRegistered = false; //设置注册成功
+        registered = true;//设置已注册
+        eventLoop.acceptNewTasks();//设置接收新任务标识isAcceptingNewTasks为true
+        safeSetSuccess(promise); //promise设置为成功
+        pipeline.fireChannelRegistered();//触发通道注册完成事件
+        // Only fire a channelActive if the channel has never been registered. This prevents firing
+        // multiple channel actives if the channel is deregistered and re-registered.
+        if (firstRegistration && isActive()) {
+            pipeline.fireChannelActive(); //触发通道可用事件
+        }
+    } catch (Throwable t) {
+        // Close the channel directly to avoid FD leak.
+        closeForcibly();
+        closeFuture.setClosed();
+        safeSetFailure(promise, t);
+    }
+}
+```
+
+```java
+    protected void doRegister() throws Exception {
+        boolean selected = false;
+        for (;;) {
+            try {
+              	//channel注册到selector上。
+              	//attachment对象就是NioServerSocketChannel实例，当事件发生时，需要对事件进行处理，就会拿到这个NioServerSocketChannel
+                selectionKey = javaChannel().register(((NioEventLoop) eventLoop().unwrap()).selector, 0, this);
+                return;
+            } catch (CancelledKeyException e) {
+                if (!selected) {
+                    //由于尚未调用Select.select（..）操作，因此强制选择器立即选择，因为“取消的” SelectionKey可能仍被缓存并且未被删除。
+                    ((NioEventLoop) eventLoop().unwrap()).selectNow();
+                    selected = true;
+                } else {
+                    // We forced a select operation on the selector before but the SelectionKey is still cached
+                    // for whatever reason. JDK bug ?
+                    throw e;
+                }
+            }
+        }
+    }
+```
+
+> 最后，看一下doBind0。
+
+```java
+    private static void doBind0(
+            final ChannelFuture regFuture, final Channel channel,
+            final SocketAddress localAddress, final ChannelPromise promise) {
+
+        // 在触发channelRegistered（）之前调用此方法。 使用户处理程序有机会在其channelRegistered（）实现中设置管道。
+      	// 之前出发了registry0，启动了NioEventLoop线程
+      	// 向通道所在的NioEventLoop提交任务「触发NioEventLoop开始工作」
+        channel.eventLoop().execute(new Runnable() {
+            @Override
+            public void run() {
+                if (regFuture.isSuccess()) {
+                  	//通道绑定端口，并绑定promise对象
+                  	//添加通道关闭监听
+                    channel.bind(localAddress, promise).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                } else {
+                  	//这一步上在上游注册失败时，对当前promise置为失败。
+                    promise.setFailure(regFuture.cause());
+                }
+            }
+        });
+    }
+```
+
+- connect
+- sync
+- channelFuture.channel().closeFuture().sync()
+
+
+
+
+
+### 通道事件传播
+
+#### 出入库context判断
+
+todo
+
+
+
+#### 接收连接
+
+> 对于server的接收连接操作，server的bossGroup负责accept接收连接，然后注册到「child」workerGroup上。
+>
+> read事件和accept事件是对于NioEventLoop来说是同一个处理流程。
+>
+> 那我们就从NioEventLoop的processSelectedKey方法处理读事件「unsafe.read()」开始。
+>
+> ![image-20200916162038069](https://gitee.com/wangigor/typora-images/raw/master/netty-accept-unsafe-read-debug.png)
+
+> 注意。这里的channel是**NioServerSocketChannel**。
+
+```java
+        // unsafe NioMessageUnsafe
+				@Override
+        public void read() {
+          
+          	//配置检查
+            assert eventLoop().inEventLoop();
+            final ChannelConfig config = config();
+            if (!config.isAutoRead() && !isReadPending()) {
+                // ChannelConfig.setAutoRead(false) was called in the meantime
+                removeReadOp();
+                return;
+            }
+						
+          	//每次读取循环要读取的最大消息数
+            final int maxMessagesPerRead = config.getMaxMessagesPerRead();
+          	//NioServerSocketChannel的pipeline
+          	// Head -> ServerBootstrapAcceptor -> Tail
+            final ChannelPipeline pipeline = pipeline();
+            boolean closed = false;
+            Throwable exception = null;
+            try {
+                try {
+                  	//循环读取，读到读不出来
+                    for (;;) {
+                      	//readBuf new ArrayList<Object>()
+                        int localRead = doReadMessages(readBuf);
+                        if (localRead == 0) {
+                            break;
+                        }
+                        if (localRead < 0) {
+                            closed = true;
+                            break;
+                        }
+
+                        // stop reading and remove op
+                        if (!config.isAutoRead()) {
+                            break;
+                        }
+
+                        if (readBuf.size() >= maxMessagesPerRead) {
+                            break;
+                        }
+                    }
+                } catch (Throwable t) {
+                    exception = t;
+                }
+              
+                setReadPending(false);
+                int size = readBuf.size();
+              	//触发NioServerSocketChannel的pipeline的通道读取事件
+              	//这里入参是组装的NioSocketChannel
+              	//pipeline 先经过Head节点，主要处理节点为ServerBootstrapAcceptor
+                for (int i = 0; i < size; i ++) {
+                    pipeline.fireChannelRead(readBuf.get(i));
+                }
+							
+                readBuf.clear();
+                pipeline.fireChannelReadComplete();
+              	//触发读取完成事件
+
+              	//异常处理。
+                if (exception != null) {
+                    if (exception instanceof IOException && !(exception instanceof PortUnreachableException)) {
+                        // ServerChannel should not be closed even on IOException because it can often continue
+                        // accepting incoming connections. (e.g. too many open files)
+                        closed = !(AbstractNioMessageChannel.this instanceof ServerChannel);
+                    }
+										//触发异常捕获事件
+                    pipeline.fireExceptionCaught(exception);
+                }
+
+                if (closed) {
+                    if (isOpen()) {
+                        close(voidPromise());
+                    }
+                }
+            } finally {
+                // Check if there is a readPending which was not processed yet.
+                // This could be for two reasons:
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+                //
+                // See https://github.com/netty/netty/issues/2254
+                if (!config.isAutoRead() && !isReadPending()) {
+                    removeReadOp();
+                }
+            }
+        }
+    }
+```
+
+
+
+##### doReadMessages
+
+```java
+		//NioServerSocketChannel
+		protected int doReadMessages(List<Object> buf) throws Exception {
+      	//javaChannel() 获取通道，ServerSocketChannelImpl
+      	//accept() serverSocketChannel.accept();
+        SocketChannel ch = javaChannel().accept();
+
+        try {
+            if (ch != null) {
+              	//组装成NioSocketChannel放入readBuf集合里。
+                buf.add(new NioSocketChannel(this, ch));
+                return 1;
+            }
+        } catch (Throwable t) {
+					//略            
+        }
+
+        return 0;
+    }
+```
+
+##### pipeline.fireChannelRead
+
+```java
+    //向头结点触发通道读取事件
+		//msg 不是读取信息，而是通道
+		public ChannelPipeline fireChannelRead(Object msg) {
+        head.fireChannelRead(msg);
+        return this;
+    }
+```
+
+```java
+    public ChannelHandlerContext fireChannelRead(Object msg) {
+      	//按照next一级一级往下找，查找类型为Inbound的context
+      	//在服务端的NioServerSocketChannel上，只有一个ServerBootstrapAcceptor
+        AbstractChannelHandlerContext next = findContextInbound();
+        ReferenceCountUtil.touch(msg, next);//这一步是为了「引用计数」用的，暂时不考虑
+        invokedNextChannelRead = true;
+      	//下一个节点，执行『读』操作
+        next.invoker().invokeChannelRead(next, msg);
+        return this;
+    }
+```
+
+```java
+    //就是从context剥离出handler，然后执行。
+		//因为前面进行了PausableChannelEventExecutor包裹
+		//PausableChannelEventExecutor
+		public void invokeChannelRead(ChannelHandlerContext ctx, Object msg) {
+        unwrapInvoker().invokeChannelRead(ctx, msg);
+    }
+		//DefaultChannelHandlerInvoker
+		public void invokeChannelRead(final ChannelHandlerContext ctx, final Object msg) {
+				//略
+
+        if (executor.inEventLoop()) {
+            invokeChannelReadNow(ctx, msg);//线程池线程，直接执行
+        } else {
+            safeExecuteInbound(new OneTimeTask() {
+                @Override
+                public void run() {
+                    invokeChannelReadNow(ctx, msg);
+                }
+            }, msg);
+        }
+    }
+		//DefaultChannelHandlerInvoker
+		public static void invokeChannelReadNow(final ChannelHandlerContext ctx, final Object msg) {
+        try {
+            ((AbstractChannelHandlerContext) ctx).invokedThisChannelRead = true;
+          	//ServerBootstrapAcceptor 读
+            ctx.handler().channelRead(ctx, msg);
+        } catch (Throwable t) {
+            notifyHandlerException(ctx, t);
+        }
+    }
+```
+
+##### ServerBootstrapAcceptor
+
+> 这是作为从boss到worker的「传递类」
+>
+> 包含了服务端启动时的worker相关的group、handler、options、attrs.
+>
+> 继承了ChannelHandlerAdapter，只重写了读、关闭、异常三个事件处理方法，是Inbound类型
+
+```java
+private static class ServerBootstrapAcceptor extends ChannelHandlerAdapter {
+
+    private final EventLoopGroup childGroup;
+    private final ChannelHandler childHandler;
+    private final Entry<ChannelOption<?>, Object>[] childOptions;
+    private final Entry<AttributeKey<?>, Object>[] childAttrs;
+
+    ServerBootstrapAcceptor(
+            EventLoopGroup childGroup, ChannelHandler childHandler,
+            Entry<ChannelOption<?>, Object>[] childOptions, Entry<AttributeKey<?>, Object>[] childAttrs) {
+        this.childGroup = childGroup;
+        this.childHandler = childHandler;
+        this.childOptions = childOptions;
+        this.childAttrs = childAttrs;
+    }
+
+    //连接处理
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+      	//为新连接NioSocketLoop添加业务处理handler
+        final Channel child = (Channel) msg;
+        child.pipeline().addLast(childHandler);
+				//设置options和attrs
+      	//略
+
+        try {
+          	//把新连接NioSocketLoop注册到workerGroup
+          	//并添加一个close的监听
+          	//就到了workerGroup中选一个loop与他绑定，然后触发对当前通道的通道监听。
+            childGroup.register(child).addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    if (!future.isSuccess()) {
+                        forceClose(child, future.cause());
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            forceClose(child, t);
+        }
+    }
+		//关闭处理
+    private static void forceClose(Channel child, Throwable t) {
+        child.unsafe().closeForcibly();
+        logger.warn("Failed to register an accepted channel: " + child, t);
+    }
+
+    //异常捕获处理
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        final ChannelConfig config = ctx.channel().config();
+        if (config.isAutoRead()) {
+            config.setAutoRead(false);
+            ctx.channel().eventLoop().schedule(new Runnable() {
+                @Override
+                public void run() {
+                    config.setAutoRead(true);
+                }
+            }, 1, TimeUnit.SECONDS);
+        }
+        ctx.fireExceptionCaught(cause);
+    }
+}
+```
+
+#### 连接
+
+#### 读
+
+#### 写
 
 
 
