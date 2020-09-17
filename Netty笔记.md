@@ -3246,20 +3246,411 @@ private void register0(ChannelPromise promise) {
 ```
 
 - connect
+
+> connect是客户端连接服务端发起的操作。
+>
+> ```java
+> bootstrap.connect("localhost", 8080).sync();
+> ```
+>
+> ```java
+> 		//Bootstrap
+>     public ChannelFuture connect(String inetHost, int inetPort) {
+>         return connect(InetSocketAddress.createUnresolved(inetHost, inetPort));
+>     }
+>     public ChannelFuture connect(SocketAddress remoteAddress) {
+>       	//都是些非空判断
+>         if (remoteAddress == null) {
+>             throw new NullPointerException("remoteAddress");
+>         }
+>         validate();
+>       
+>         return doResolveAndConnect(remoteAddress, localAddress());
+>     }
+> ```
+
+```java
+    private ChannelFuture doResolveAndConnect(SocketAddress remoteAddress, final SocketAddress localAddress) {
+      	//新建channel，并注册到NioEventLoopGroup上，与一个NioEventLoop对应。
+        final ChannelFuture regFuture = initAndRegister();
+        if (regFuture.cause() != null) {
+            return regFuture;
+        }
+
+        final Channel channel = regFuture.channel();//通道NioSocketChannel
+        final EventLoop eventLoop = channel.eventLoop();//NioEventLoop的包装 PausableChannelEventLoop
+      	//SocketAddress「localhost:8080」的解析器
+        final NameResolver<SocketAddress> resolver = this.resolver.getResolver(eventLoop);
+
+        if (!resolver.isSupported(remoteAddress) || resolver.isResolved(remoteAddress)) {
+            // 如果解析器解析不了 或者 已经解析过，直接进行连接后续操作。
+            return doConnect(remoteAddress, localAddress, regFuture, channel.newPromise());
+        }
+				
+      	//socketAddress解析
+        final Future<SocketAddress> resolveFuture = resolver.resolve(remoteAddress);
+        final Throwable resolveFailureCause = resolveFuture.cause();
+      	//解析异常直接失败。
+        if (resolveFailureCause != null) {
+            channel.close();
+            return channel.newFailedFuture(resolveFailureCause);
+        }
+				//解析完，进行连接后续操作。
+      	//这里不是一个阻塞的等待。
+        if (resolveFuture.isDone()) {
+          	//result: InetSocketAddress「localhost/127.0.0.1:8080」
+            return doConnect(resolveFuture.getNow(), localAddress, regFuture, channel.newPromise());
+        }
+				
+      	//添加「解析完成」的监听器。用于后续连接。
+        final ChannelPromise connectPromise = channel.newPromise();
+        resolveFuture.addListener(new FutureListener<SocketAddress>() {
+            @Override
+            public void operationComplete(Future<SocketAddress> future) throws Exception {
+                if (future.cause() != null) {
+                    channel.close();
+                    connectPromise.setFailure(future.cause());
+                } else {
+                    doConnect(future.getNow(), localAddress, regFuture, connectPromise);
+                }
+            }
+        });
+
+        return connectPromise;
+    }
+```
+
+```java
+    //doConnect先做了「通道初始化及注册」future的容错。
+		//如果没有完成就添加监听等待。
+		private static ChannelFuture doConnect(
+            final SocketAddress remoteAddress, final SocketAddress localAddress,
+            final ChannelFuture regFuture, final ChannelPromise connectPromise) {
+        if (regFuture.isDone()) {
+            doConnect0(remoteAddress, localAddress, regFuture, connectPromise);
+        } else {
+            regFuture.addListener(new ChannelFutureListener() {
+                @Override
+                public void operationComplete(ChannelFuture future) throws Exception {
+                    doConnect0(remoteAddress, localAddress, regFuture, connectPromise);
+                }
+            });
+        }
+
+        return connectPromise;
+    }
+```
+
+```java
+    private static void doConnect0(
+            final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelFuture regFuture,
+            final ChannelPromise connectPromise) {
+
+        final Channel channel = connectPromise.channel();
+      	//使用channel的eventLoop「NioEventLoop」执行连接任务
+        channel.eventLoop().execute(new Runnable() {
+            @Override
+            public void run() {
+                if (regFuture.isSuccess()) {
+                  	//连接
+                    if (localAddress == null) {
+                        channel.connect(remoteAddress, connectPromise);
+                    } else {
+                        channel.connect(remoteAddress, localAddress, connectPromise);
+                    }
+                  	//添加失败监听
+                    connectPromise.addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                } else {
+                  	//通道创建及注册失败。
+                    connectPromise.setFailure(regFuture.cause());
+                }
+            }
+        });
+    }
+```
+
+> 上面都是「数据准备」，下面开始连接。
+
+```java
+//AbstractChannel
+@Override
+public ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+  	//调用pipeline进行连接
+    return pipeline.connect(remoteAddress, promise);
+}
+```
+
+```java
+		//DefaultChannelPipeline
+		@Override
+    public ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+      	//从tail节点开始执行「tail靠近用户」
+        return tail.connect(remoteAddress, promise);
+    }
+```
+
+```java
+    //重载
+		@Override
+    public ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+        return connect(remoteAddress, null, promise);
+    }
+    @Override
+    public ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
+      	//寻找outBound类型的HandlerContext
+      	//没有么，就到Head了。
+        AbstractChannelHandlerContext next = findContextOutbound();
+      	//使用head执行连接操作
+        next.invoker().invokeConnect(next, remoteAddress, localAddress, promise);
+        return promise;
+    }
+```
+
+```java
+    @Override
+    public void invokeConnect(
+           ChannelHandlerContext ctx, SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
+        unwrapInvoker().invokeConnect(ctx, remoteAddress, localAddress, promise);
+    }
+```
+
+
+
+```java
+//DefaultChannelHandlerInvoker
+public void invokeConnect(
+        final ChannelHandlerContext ctx,
+        final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+  	//非空判断及通道关闭的校验
+    if (remoteAddress == null) {
+        throw new NullPointerException("remoteAddress");
+    }
+    if (!validatePromise(ctx, promise, false)) {
+        // promise cancelled
+        return;
+    }
+
+  	//NioEventLoop执行
+    if (executor.inEventLoop()) {
+        invokeConnectNow(ctx, remoteAddress, localAddress, promise);
+    } else {
+        safeExecuteOutbound(new OneTimeTask() {
+            @Override
+            public void run() {
+                invokeConnectNow(ctx, remoteAddress, localAddress, promise);
+            }
+        }, promise);
+    }
+}
+```
+
+```java
+//ChannelHandlerInvokerUtil
+public static void invokeConnectNow(
+        final ChannelHandlerContext ctx,
+        final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+    try {
+      	//适配及异常捕获
+        ctx.handler().connect(ctx, remoteAddress, localAddress, promise);
+    } catch (Throwable t) {
+        notifyOutboundHandlerException(t, promise);
+    }
+}
+```
+
+```java
+				//DefaultChannelPipeline
+				public void connect(
+                ChannelHandlerContext ctx,
+                SocketAddress remoteAddress, SocketAddress localAddress,
+                ChannelPromise promise) throws Exception {
+          	//使用与用户线程隔离的Unsafe进行通道操作
+            unsafe.connect(remoteAddress, localAddress, promise);
+        }
+```
+
+```java
+        public final void connect(
+                final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
+            if (!promise.setUncancellable() || !ensureOpen(promise)) {
+                return;
+            }
+
+            try {
+                if (connectPromise != null) {
+                    throw new IllegalStateException("connection attempt already made");
+                }
+
+                boolean wasActive = isActive();
+              	//连接
+                if (doConnect(remoteAddress, localAddress)) {
+                  	//连接成功处理
+                    fulfillConnectPromise(promise, wasActive);
+                } else {
+                  	//连接超时处理
+                    connectPromise = promise;
+                    requestedRemoteAddress = remoteAddress;
+
+                    // Schedule connect timeout.
+                    int connectTimeoutMillis = config().getConnectTimeoutMillis();
+                    if (connectTimeoutMillis > 0) {
+                        connectTimeoutFuture = eventLoop().schedule(new OneTimeTask() {
+                            @Override
+                            public void run() {
+                                ChannelPromise connectPromise = AbstractNioChannel.this.connectPromise;
+                                ConnectTimeoutException cause =
+                                        new ConnectTimeoutException("connection timed out: " + remoteAddress);
+                                if (connectPromise != null && connectPromise.tryFailure(cause)) {
+                                    close(voidPromise());
+                                }
+                            }
+                        }, connectTimeoutMillis, TimeUnit.MILLISECONDS);
+                    }
+
+                    promise.addListener(new ChannelFutureListener() {
+                        @Override
+                        public void operationComplete(ChannelFuture future) throws Exception {
+                            if (future.isCancelled()) {
+                                if (connectTimeoutFuture != null) {
+                                    connectTimeoutFuture.cancel(false);
+                                }
+                                connectPromise = null;
+                                close(voidPromise());
+                            }
+                        }
+                    });
+                }
+            } catch (Throwable t) {
+                promise.tryFailure(annotateConnectException(t, remoteAddress));
+                closeIfClosed();
+            }
+        }
+```
+
+```java
+    protected boolean doConnect(SocketAddress remoteAddress, SocketAddress localAddress) throws Exception {
+      	//通道绑定
+        if (localAddress != null) {
+            javaChannel().socket().bind(localAddress);
+        }
+
+        boolean success = false;
+        try {
+          	//连接
+            boolean connected = javaChannel().connect(remoteAddress);
+            if (!connected) {
+              	//设置对连接事件感兴趣
+                selectionKey().interestOps(SelectionKey.OP_CONNECT);
+            }
+            success = true;
+            return connected;
+        } finally {
+            if (!success) {
+                doClose();
+            }
+        }
+    }
+```
+
+> connect就看到这里。
+
 - sync
+
+> Netty 默认使用DefaultPromise
+
+```java
+    public Promise<V> sync() throws InterruptedException {
+        await();//阻塞等待
+        rethrowIfFailed();//失败抛出异常
+        return this;
+    }
+```
+
+
+
 - channelFuture.channel().closeFuture().sync()
 
-
+> 对Netty的close future进行同步等待。
+>
+> 否则，在bind().sync()或者connect().sync()操作的等待完成之后，程序会退出。
 
 
 
 ### 通道事件传播
 
-#### 出入库context判断
+#### context判断Inbound和Outbound
 
-todo
+> Netty 4以及之前使用的的是ChannelHandler的两个子类ChannelOutboundHandlerAdapter和ChannelInboundHandlerAdapter来判断的。
+>
+> 现在这俩接口统一合并在了ChannelHandlerAdapter里。
 
-
+> 在ChannelHandlerContext的统一抽象父类里，提供了统一的判断
+>
+> ```java
+> private AbstractChannelHandlerContext findContextInbound() {
+> AbstractChannelHandlerContext ctx = this;
+> do {
+>   ctx = ctx.next;
+> } while ((ctx.skipFlags & MASKGROUP_INBOUND) == MASKGROUP_INBOUND);
+> return ctx;
+> }
+> 
+> private AbstractChannelHandlerContext findContextOutbound() {
+> AbstractChannelHandlerContext ctx = this;
+> do {
+>   ctx = ctx.prev;
+> } while ((ctx.skipFlags & MASKGROUP_OUTBOUND) == MASKGROUP_OUTBOUND);
+> return ctx;
+> }
+> ```
+> 也就是通过skipFlags来计算的。
+>
+> ```java
+> static final int MASK_HANDLER_ADDED = 1;
+> static final int MASK_HANDLER_REMOVED = 1 << 1;
+> 
+> private static final int MASK_EXCEPTION_CAUGHT = 1 << 2;
+> private static final int MASK_CHANNEL_REGISTERED = 1 << 3;
+> private static final int MASK_CHANNEL_UNREGISTERED = 1 << 4;
+> private static final int MASK_CHANNEL_ACTIVE = 1 << 5;
+> private static final int MASK_CHANNEL_INACTIVE = 1 << 6;
+> private static final int MASK_CHANNEL_READ = 1 << 7;
+> private static final int MASK_CHANNEL_READ_COMPLETE = 1 << 8;
+> private static final int MASK_CHANNEL_WRITABILITY_CHANGED = 1 << 9;
+> private static final int MASK_USER_EVENT_TRIGGERED = 1 << 10;
+> 
+> private static final int MASK_BIND = 1 << 11;
+> private static final int MASK_CONNECT = 1 << 12;
+> private static final int MASK_DISCONNECT = 1 << 13;
+> private static final int MASK_CLOSE = 1 << 14;
+> private static final int MASK_DEREGISTER = 1 << 15;
+> private static final int MASK_READ = 1 << 16;
+> private static final int MASK_WRITE = 1 << 17;
+> private static final int MASK_FLUSH = 1 << 18;
+> 
+> private static final int MASKGROUP_INBOUND = MASK_EXCEPTION_CAUGHT |
+>      MASK_CHANNEL_REGISTERED |
+>      MASK_CHANNEL_UNREGISTERED |
+>      MASK_CHANNEL_ACTIVE |
+>      MASK_CHANNEL_INACTIVE |
+>      MASK_CHANNEL_READ |
+>      MASK_CHANNEL_READ_COMPLETE |
+>      MASK_CHANNEL_WRITABILITY_CHANGED |
+>      MASK_USER_EVENT_TRIGGERED;
+> 
+> private static final int MASKGROUP_OUTBOUND = MASK_BIND |
+>      MASK_CONNECT |
+>      MASK_DISCONNECT |
+>      MASK_CLOSE |
+>      MASK_DEREGISTER |
+>      MASK_READ |
+>      MASK_WRITE |
+>      MASK_FLUSH;
+> ```
+> 就是通过handler重写了那些方法来判断的。
+>
+> - Inbound : 重写registered、unregistered、active、inactive、read、read_complete、writability_changed、user_event_triggered
+> - Outbound : 重写connect、disconnect、close、deregister、read、write、flush
 
 #### 接收连接
 
@@ -3522,9 +3913,11 @@ private static class ServerBootstrapAcceptor extends ChannelHandlerAdapter {
 
 #### 连接
 
-#### 读
+> Bootstrap的connect方法。
 
-#### 写
+#### 读/写
+
+> 也是一样，当事件发生时，通过pipeline，一个一个handler进行处理。
 
 
 
