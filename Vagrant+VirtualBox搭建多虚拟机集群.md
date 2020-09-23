@@ -6,7 +6,7 @@
 >
 > 1）下载安装完成VirtualBox和Vagrant；
 >
-> 2）vagrant init centos/7 已经拉取了centos7的官方镜像 【https://www.vagrantup.com/downloads.html】
+> 2）vagrant init centos/7 已经拉取了centos7的官方镜像 【https://www.vagrantup.com/downloads】
 
 ## 修改Vagrantfile
 
@@ -143,3 +143,31 @@ eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group
 需要在VirtualBox全局的网络设置里，添加一个NAT网络。
 
 手动设置到三个虚拟机的NAT网卡里，切记要点开高级，手动刷新mac地址。
+
+## 扩容问题
+
+> 最简单的方式是使用vagrant插件
+>
+> 官网地址
+>
+> https://github.com/sprotheroe/vagrant-disksize
+
+```shell
+# 安装vagrant插件
+vagrant plugin install vagrant-disksize
+```
+
+```properties
+Vagrant.configure('2') do |config|
+  config.vm.box = '镜像'
+  config.disksize.size = '100GB' #设置磁盘大小
+end
+```
+
+```shell
+# 关闭虚拟机
+vagrant halt
+# 重新启动 
+vagrant up
+```
+
