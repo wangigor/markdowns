@@ -3921,9 +3921,993 @@ private static class ServerBootstrapAcceptor extends ChannelHandlerAdapter {
 
 
 
+### 内存管理
+
+> 在没读源码前，只是知道是使用堆外内存进行channel到handler的数据传输。那堆外内存呢，使用虚引用的继承类，进行回收操作。
+>
+> 但是堆外内存的开辟比堆内存分配慢十几倍。不知道作为优化狂魔的netty还做了这么多东西。
+
+> ByteBuf随处可见「在还没有自定义编码解码器的时候」，它用于传输对象。
+>
+> 以读写为例：
+
+- **读**
+
+> NioEventLoop通过select得到的读事件 「NioEventLoop.processSelectedKey()」 -> 读ByteBuf -> 传递给handlerContext
+
+![image-20200917171859874](https://gitee.com/wangigor/typora-images/raw/master/netty-read-byteBuf.png)
+
+使用的是可自动回收的堆外内存。
+
+- **写**
+
+> 用户数据通过handlerContext -> 写ByteBuf的转换 -> 通道传输出去
+
+![image-20200917172657423](https://gitee.com/wangigor/typora-images/raw/master/netty-write-byteBuf.png)
+
+```java
+protected final Object filterOutboundMessage(Object msg) {
+    if (msg instanceof ByteBuf) {
+        ByteBuf buf = (ByteBuf) msg;
+        if (buf.isDirect()) {
+            return msg;
+        }
+				
+      	//即便是自建的ByteBuf，都要变成「堆外内存」
+        return newDirectBuffer(buf);
+    }
+
+    if (msg instanceof FileRegion) {
+        return msg;
+    }
+
+    throw new UnsupportedOperationException(
+            "unsupported message type: " + StringUtil.simpleClassName(msg) + EXPECTED_TYPES);
+}
+```
 
 
 
+#### jemalloc实现
+
+> [jemalloc2006年论文](https://people.freebsd.org/~jasone/jemalloc/bsdcan2006/jemalloc.pdf)
+>
+> [facebook的jemalloc实践](https://www.facebook.com/notes/facebook-engineering/scalable-memory-allocation-using-jemalloc/480222803919)
+>
+> 内存规格分档：
+>
+> <img src="https://gitee.com/wangigor/typora-images/raw/master/netty-内存规格分档.png" alt="img" style="zoom: 33%;" />
+>
+> - **tiny** 0~512B
+> - **small** 512B~8K
+> - **normal** 8K~16M
+> - **huge** 16M以上
+>
+> 下面是需要进行内存管理的池化内存模型
+>
+> <img src="https://gitee.com/wangigor/typora-images/raw/master/PoolArea结构.png" alt="image-20200924150614560" style="zoom:150%;" />
+>
+> 内存在使用完，释放「release」时，不会真的释放而是加入cache中。
+>
+> ![image-20200927090908875](https://gitee.com/wangigor/typora-images/raw/master/PoolThreadCache结构.png)
+
+##### 分配内存allocte
+
+> ```java
+> //入口
+> byteBuf = allocHandle.allocate(allocator);
+> //allocHandle
+> //使用自适应接收ByteBuf分配器AdaptiveRecvByteBufAllocator.HandleImpl
+> //对ByteBuf容量进行预测，默认采用1024读取，如果ByteBuf上一次循环读取时，累计读取长度大于ByteBuf的分配空间「缓冲空间」，优雅自适应扩容。
+> 
+> //allocator
+> //内存分配器，可通过-Dio.netty.allocator.type参数指定。
+> //默认使用「池化的堆外内存」PooledByteBufAllocator(PlatformDependent.directBufferPreferred());
+> ```
+
+```java
+//AdaptiveRecvByteBufAllocator
+@Override
+public ByteBuf allocate(ByteBufAllocator alloc) {
+  	//通过ByteBufAllocator进行内存分配
+  	//nextReceiveBufferSize是预测接收ByteBuf大小，初始是1024
+  	//分为53档[16,512]区间间隔16，[512-1G]翻倍。初始是33档「32」
+    return alloc.ioBuffer(nextReceiveBufferSize);
+}
+```
+
+```java
+//AbstractByteBufAllocator「PooledByteBufAllocator」
+@Override
+public ByteBuf ioBuffer(int initialCapacity) {
+  	//可以通过-Dsun.misc.Unsafe参数指定  使用堆内/堆外内存
+  	//默认第true「堆外内存」
+    if (PlatformDependent.hasUnsafe()) {
+        return directBuffer(initialCapacity);
+    }
+    return heapBuffer(initialCapacity);
+}
+```
+
+```java
+//AbstractByteBufAllocator「PooledByteBufAllocator」
+@Override
+public ByteBuf directBuffer(int initialCapacity) {
+  	//默认最大分配空间为Integer.MAX_VALUE 「 2G -1 」
+    return directBuffer(initialCapacity, Integer.MAX_VALUE);
+}
+```
+
+```java
+//AbstractByteBufAllocator「PooledByteBufAllocator」
+@Override
+public ByteBuf directBuffer(int initialCapacity, int maxCapacity) {
+  	//容错校验
+    if (initialCapacity == 0 && maxCapacity == 0) {
+        return emptyBuf;
+    }
+    validate(initialCapacity, maxCapacity);
+  	//分配
+    return newDirectBuffer(initialCapacity, maxCapacity);
+}
+```
+
+```java
+//AbstractByteBufAllocator「PooledByteBufAllocator」
+@Override
+protected ByteBuf newDirectBuffer(int initialCapacity, int maxCapacity) {
+  
+  	//每个线程单独分配
+  	//使用了FastThreadLocal<PoolThreadCache> directArena在threadLocal初始化的时候，就已经初始化好了一个PoolThreadCache,对应一个空「empty」PoolArena.
+    PoolThreadCache cache = threadCache.get();
+    PoolArena<ByteBuffer> directArena = cache.directArena;
+
+    ByteBuf buf;
+  	//创建ByteBuf对象并分配内存空间
+    if (directArena != null) {
+        buf = directArena.allocate(cache, initialCapacity, maxCapacity);
+    } else {
+        if (PlatformDependent.hasUnsafe()) {
+            buf = new UnpooledUnsafeDirectByteBuf(this, initialCapacity, maxCapacity);
+        } else {
+            buf = new UnpooledDirectByteBuf(this, initialCapacity, maxCapacity);
+        }
+    }
+
+  	//加入内存泄漏检测
+    return toLeakAwareBuffer(buf);
+}
+```
+
+```java
+//PoolArena.DirectArena
+PooledByteBuf<T> allocate(PoolThreadCache cache, int reqCapacity, int maxCapacity) {
+  	//创建ByteBuf对象
+  	//这里使用了Recycler对象池，下面会讲到，这里就不展开了。
+    PooledByteBuf<T> buf = newByteBuf(maxCapacity);
+  	//为ByteBuf分配空间
+    allocate(cache, buf, reqCapacity);
+    return buf;
+}
+```
+
+```java
+private void allocate(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity) {
+  	//对申请内存大小进行规整，规整到2次幂或者16的倍数
+    final int normCapacity = normalizeCapacity(reqCapacity);
+  	//8K一下的分配，tiny或者small
+    if (isTinyOrSmall(normCapacity)) { // capacity < pageSize
+        int tableIdx;
+        PoolSubpage<T>[] table;
+      
+      	//tiny和small的分配步骤一样。
+      	//优先从cache分配，否则从subpage分配，否则分配新chunk
+        if (isTiny(normCapacity)) { // < 512
+          	//cache
+            if (cache.allocateTiny(this, buf, reqCapacity, normCapacity)) {
+                return;
+            }
+          	//匹配subpage
+            tableIdx = tinyIdx(normCapacity);
+            table = tinySubpagePools;
+        } else {
+          	//cache
+            if (cache.allocateSmall(this, buf, reqCapacity, normCapacity)) {
+                return;
+            }
+          	//匹配subpage
+            tableIdx = smallIdx(normCapacity);
+            table = smallSubpagePools;
+        }
+				//subpage分配
+        synchronized (this) {
+            final PoolSubpage<T> head = table[tableIdx];
+            final PoolSubpage<T> s = head.next;
+            if (s != head) {
+                assert s.doNotDestroy && s.elemSize == normCapacity;
+                long handle = s.allocate();
+                assert handle >= 0;
+                s.chunk.initBufWithSubpage(buf, handle, reqCapacity);
+                return;
+            }
+        }
+    //8K~16M的分配 normal
+    } else if (normCapacity <= chunkSize) {
+        if (cache.allocateNormal(this, buf, reqCapacity, normCapacity)) {
+            // was able to allocate out of the cache so move on
+            return;
+        }
+    //16M以上的分配，huge不计入cache
+    //直接分配一个reqCapacity的chunk，不需要拆分
+    } else {
+        // Huge allocations are never served via the cache so just call allocateHuge
+        allocateHuge(buf, reqCapacity);
+        return;
+    }
+  	//正常分配「重新分配chunk」，也就是cache没有分配成功「或许是首次分配，或许是空间不足」
+    allocateNormal(buf, reqCapacity, normCapacity);
+}
+```
+
+###### normalizeCapacity申请内存规整
+
+```java
+int normalizeCapacity(int reqCapacity) {
+    if (reqCapacity < 0) {
+        throw new IllegalArgumentException("capacity: " + reqCapacity + " (expected: 0+)");
+    }
+  	//16M以上的分配，不计入池化管理，直接走Huge分配
+    if (reqCapacity >= chunkSize) {
+        return reqCapacity;
+    }
+
+  	//512及以上的内存申请，规整到2的n次幂
+    if (!isTiny(reqCapacity)) { // >= 512
+        // Doubled
+
+        int normalizedCapacity = reqCapacity;
+        normalizedCapacity --;
+        normalizedCapacity |= normalizedCapacity >>>  1;
+        normalizedCapacity |= normalizedCapacity >>>  2;
+        normalizedCapacity |= normalizedCapacity >>>  4;
+        normalizedCapacity |= normalizedCapacity >>>  8;
+        normalizedCapacity |= normalizedCapacity >>> 16;
+        normalizedCapacity ++;
+
+        if (normalizedCapacity < 0) {
+            normalizedCapacity >>>= 1;
+        }
+
+        return normalizedCapacity;
+    }
+
+    // Quantum-spaced
+  	//16到512区间内，16的倍数不需要规整，直接返回
+    if ((reqCapacity & 15) == 0) {
+        return reqCapacity;
+    }
+
+  	//非16的倍数，规整到16的倍数。
+    return (reqCapacity & ~15) + 16;
+}
+```
+
+###### cache分配
+
+> 可以先略过，先看normal分配新chunk。释放之后，才会加入cache中。
+
+###### subpage分配
+
+> 可以先略过，先看normal分配新chunk。chunk分配完成才会加入subpage。
+
+> 看完了normal分配之后，这里的问题就很简单了，就是找到申请内存规整后，对应的subpage档位的双向链表，尝试进行分配。
+
+```java
+//PoolChunk
+//使用了一个重载initBufWithSubpage方法
+void initBufWithSubpage(PooledByteBuf<T> buf, long handle, int reqCapacity) {
+    initBufWithSubpage(buf, handle, (int) (handle >>> Integer.SIZE), reqCapacity);
+}
+```
+
+###### normal分配新chunk
+
+> 初次内存分配，会使用ByteBuffer.allocateDirect(chunkSize)进行内存开辟。
+>
+> ```java
+> //入口
+> //buf 对象池中的ByteBuf对象
+> //reqCapacity 申请大小
+> //normCapacity 规整后的申请大小
+> allocateNormal(buf, reqCapacity, normCapacity);
+> ```
+
+```java
+//PoolArena「DirectArena」
+private synchronized void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int normCapacity) {
+  	//优先分配顺序
+  	//q050 > q025 > q000 > qInit > q075 > q100
+  	//优先q050和q025上分配，应该是为了提高内存使用率。
+  	//q075和q100分配成功率较低，放在最后。
+  	//当然。首次分配的时候，这些都不存在。
+    if (q050.allocate(buf, reqCapacity, normCapacity) || q025.allocate(buf, reqCapacity, normCapacity) ||
+        q000.allocate(buf, reqCapacity, normCapacity) || qInit.allocate(buf, reqCapacity, normCapacity) ||
+        q075.allocate(buf, reqCapacity, normCapacity) || q100.allocate(buf, reqCapacity, normCapacity)) {
+        return;
+    }
+
+    //已存在的chunkList都不能分配成功，申请新chunk「16M」
+  	//pageSize 8K
+  	//maxOrder 12层 「11」
+  	//pageShifts 「13 2^13=8192=8K」
+  	//chunkSize 16M
+    PoolChunk<T> c = newChunk(pageSize, maxOrder, pageShifts, chunkSize);
+  	//chunk分配空间
+    long handle = c.allocate(normCapacity);
+    assert handle > 0;
+  	//「填充」ByteBuf
+    c.initBuf(buf, handle, reqCapacity);
+  	//从qInit节点开始插入chunkList中
+    qInit.add(c);
+}
+```
+
+***
+
+==申请Chunk==
+
+```java
+//PoolArena 「DirectArena」
+protected PoolChunk<ByteBuffer> newChunk(int pageSize, int maxOrder, int pageShifts, int chunkSize) {
+    return new PoolChunk<ByteBuffer>(
+      			//使用unsafe申请一个chunkSize大小的内存,返回一个nio的DirectByteBuffer
+            this, ByteBuffer.allocateDirect(chunkSize), pageSize, maxOrder, pageShifts, chunkSize);
+}
+```
+
+<img src="https://gitee.com/wangigor/typora-images/raw/master/netty-newChunk-DirectByteBuffer.png" alt="image-20200927143324525" style="zoom: 50%;" />
+
+记录了内存地址、大小，以及一个内存清理器cleaner。
+
+下面来看一下PoolChunk的构造函数
+
+```java
+PoolChunk(PoolArena<T> arena, T memory, int pageSize, int maxOrder, int pageShifts, int chunkSize) {
+    unpooled = false;//池化
+    this.arena = arena;//父PoolArena
+    this.memory = memory;//DirectByteBuffer
+    this.pageSize = pageSize;//8192
+    this.pageShifts = pageShifts;//13
+    this.maxOrder = maxOrder;//11
+    this.chunkSize = chunkSize;//16777216
+    unusable = (byte) (maxOrder + 1);//失效的二叉节点置为12
+    log2ChunkSize = log2(chunkSize);//chunkSize是2的log2ChunkSize次幂
+    subpageOverflowMask = ~(pageSize - 1);//~8191
+    freeBytes = chunkSize;//剩余空间
+
+    assert maxOrder < 30 : "maxOrder should be < 30, but is: " + maxOrder;
+    maxSubpageAllocs = 1 << maxOrder;//总共分配2048「2^11」个「空间节点」,也就是二叉树的最底层为分配空间节点。对应后面2048个subpage
+
+    //生成两个二叉树「数组形式」公有4096个节点
+    memoryMap = new byte[maxSubpageAllocs << 1];
+    depthMap = new byte[memoryMap.length];
+    int memoryMapIndex = 1;
+  	//遍历二叉树，把每个节点的阶数放进去「0-11」
+  	//注意。这里多分配了一个0阶节点。「0-0，1-0」
+    for (int d = 0; d <= maxOrder; ++ d) { 
+        int depth = 1 << d;
+        for (int p = 0; p < depth; ++ p) {
+            memoryMap[memoryMapIndex] = (byte) d;
+            depthMap[memoryMapIndex] = (byte) d;//只是用来记录阶数，不会发生修改。
+            memoryMapIndex ++;
+        }
+    }
+		//初始化2048个PoolSubpage
+    subpages = newSubpageArray(maxSubpageAllocs);
+}
+```
+
+- chunk分配
+
+  ```java
+  //PoolChunk
+  long allocate(int normCapacity) {
+    	//8k以上的分配方式
+      if ((normCapacity & subpageOverflowMask) != 0) { // >= pageSize
+          return allocateRun(normCapacity);
+      //8k一下的分配方式
+      } else {
+          return allocateSubpage(normCapacity);
+      }
+  }
+  ```
+
+  > 注意：
+  >
+  > allocateRun对应了page级别的分配
+  >
+  > allocateSubpage对应了subpage级别的分配
+  >
+  > 两个返回值的不同在long的高64位：
+  >
+  > - subpage：bitmapIdx | 最高位为1
+  > - page : 0
+
+  - allocateRun 8K以上分配方式
+
+  ```java
+  //PoolChunk
+  private long allocateRun(int normCapacity) {
+    	//计算节点深度 16M-0阶 8K-11阶
+      int d = maxOrder - (log2(normCapacity) - pageShifts);
+      int id = allocateNode(d);//找到对应节点
+      if (id < 0) {
+          return id;
+      }
+      freeBytes -= runLength(id);//占用当前节点所在层级的空间大小
+      return id;
+  }
+  ```
+
+  - allocateSubpage 8K以下分配方式
+
+  ```java
+  //PoolChunk
+  private long allocateSubpage(int normCapacity) {
+      int d = maxOrder; 
+    	//8K以下，分配第11层的节点
+      int id = allocateNode(d);
+    	//未分配成功
+      if (id < 0) {
+          return id;
+      }
+  		
+      final PoolSubpage<T>[] subpages = this.subpages;
+      final int pageSize = this.pageSize;//8192
+    
+      freeBytes -= pageSize;//计算空闲空间
+    
+  		//计算所在的Subpage 比如2048=0，2049=1
+    	//memoryMapIdx ^ maxSubpageAllocs「2048 后11位为0」
+      int subpageIdx = subpageIdx(id);
+      PoolSubpage<T> subpage = subpages[subpageIdx];
+      if (subpage == null) {//Subpage初始化
+        	//runOffset(id) 当前空间对于DirectBuffer的起始偏移量
+        	//初始化PageSubpage,占用空间，分档放入subpage[]双向链表中。
+          subpage = new PoolSubpage<T>(this, id, runOffset(id), pageSize, normCapacity);
+          subpages[subpageIdx] = subpage;
+      } else {
+          subpage.init(normCapacity);//占用内存 
+      }
+    	//subpage分配
+      return subpage.allocate();
+  }
+  ```
+
+  ```java
+  //PoolSubpage
+  PoolSubpage(PoolChunk<T> chunk, int memoryMapIdx, int runOffset, int pageSize, int elemSize) {
+      this.chunk = chunk;//父chunk
+      this.memoryMapIdx = memoryMapIdx;
+      this.runOffset = runOffset;//起始偏移量
+      this.pageSize = pageSize;//当前page大小
+    	//初始化8个bytemap
+    	//每一位代表16字节的空间，因为最小分配16「规整」,bytemap需要8192/16=512位来记录这全部的8K
+    	//而一个long占64位，所以bitmap可以表示为8个long
+      bitmap = new long[pageSize >>> 10]; // pageSize / 16 / 64
+    	//subpage初始化
+      init(elemSize);
+  }
+  ```
+
+  ```java
+  //PoolSubpage
+  void init(int elemSize) {
+      doNotDestroy = true;
+      this.elemSize = elemSize;//已占用空间
+      if (elemSize != 0) {
+        	// 把pageSize按照申请大小 进行分割，这里记录分割数量
+        	//比如申请1024，这里maxNumElems就是8
+        	//比如申请16，这里maxNumElems就是512
+          maxNumElems = numAvail = pageSize / elemSize;
+          nextAvail = 0;
+        	//bitmapLength 是在bitmap中「可用」当前用于记录的long的数量
+        	//比如 maxNumElems=8，8/64,使用1个long记录
+        	//比如 maxNumElems=512，512/64,使用8个long记录
+          bitmapLength = maxNumElems >>> 6;
+          if ((maxNumElems & 63) != 0) {//不足1的按1算。
+              bitmapLength ++;
+          }
+  				
+        	//这一步好像没有用处，因为bitmap初始就是 {0,0,0,0,0,0,0,0}
+          for (int i = 0; i < bitmapLength; i ++) {
+              bitmap[i] = 0;
+          }
+      }
+  		//添加到双向链表「PoolSubpage[] tinySubpagePools/smallSubpagePools」中
+    	//因为subpagePools进行了分档，tiny每16为一档，共32档；small每档翻倍，共4档。
+    	//获取节点，加入每一档的双向链表中，这里就不展开了
+      addToPool();
+  }
+  ```
+
+allocateNode 寻找二叉树节点
+
+```java
+private int allocateNode(int d) {
+    int id = 1;//从根节点开始
+    int initial = - (1 << d); //反码 后11位为1
+    byte val = value(id);//memoryMap[id];
+    if (val > d) { // 当前节点的值大于当前节点的阶数，说明当前节点已经分配出去了「非空闲」
+        return -1;
+    }
+  	//当前节点空闲 且 在d阶节点之上。就继续循环
+    while (val < d || (id & initial) == 0) { // id & initial == 1 << d for all ids at depth d, for < d it is 0
+        id <<= 1;//当前节点的左节点『下一阶』
+        val = value(id);
+      	//左节点非空闲
+        if (val > d) {
+          	//去兄弟节点查找
+            id ^= 1;
+            val = value(id);
+        }
+    }
+  	//经过上面的循环，就找到了可以分配的节点
+    byte value = value(id);
+  	//检查阶数是否正确
+    assert value == d && (id & initial) == 1 << d : String.format("val = %d, id & initial = %d, d = %d",
+            value, id & initial, d);
+  	//设置当前阶数的值为已占用「12」
+    setValue(id, unusable); // mark as unusable
+  	//级联更新父节点
+    updateParentsAlloc(id);
+    return id;
+}
+```
+
+runOffset 空间偏移量
+
+> 当前节点「比如2049号节点」对应的DirectBuffer整个空间的起始位置偏移量「2049对应8192，因为2048分配出去8K」
+
+```java
+private int runOffset(int id) {
+    int shift = id ^ 1 << depth(id);//计算当前节点相对于二叉树最左节点的偏移量 2048=0 2049=1
+    return shift * runLength(id);//runLength(id)表示id这一层「2049所在的第11层」每个节点相对于前一个节点的偏移量「8192」
+}
+```
+
+	- subpage分配
+
+```java
+//PoolSubpage
+//返回subpage对应的bitmap索引
+long allocate() {
+    if (elemSize == 0) {
+        return toHandle(0);
+    }
+    if (numAvail == 0 || !doNotDestroy) {
+        return -1;
+    }
+		//找到下一个可用的bitmap「初始化为0，经过这一次，nextAvail被设为了-1,并返回0」
+    final int bitmapIdx = getNextAvail();
+    int q = bitmapIdx >>> 6;//第q个long
+    int r = bitmapIdx & 63;//第q个long的r个位置要开始被「占用」
+    assert (bitmap[q] >>> r & 1) == 0;//检查当前位置未被占用
+    bitmap[q] |= 1L << r;//占用，标记为1 「一个1，就代表了1个「申请大小」的subpage的分段被占用」
+
+    if (-- numAvail == 0) {//可用数量-1，如果没了，说明全占满了，从subpage的双向链表中移除
+        removeFromPool();
+    }
+		//返回，低32位记录subpage所在chunk的位置「2048」，高32位记录分配内存所在subpage的索引「第几块」
+    return toHandle(bitmapIdx);
+}
+```
+
+```java
+private long toHandle(int bitmapIdx) {
+  	//0x4000000000000000L 是除了符号位，最高位为1的long
+  	//返回结果 高32位存放bitmapIdx，低32位存放memoryMapIdx
+    return 0x4000000000000000L | (long) bitmapIdx << 32 | memoryMapIdx;
+}
+```
+
+那么到这里，申请chunk就完成了。
+
+***
+
+==「填充」byteBuf==
+
+> ```java
+> //入口
+> //handle上面有介绍
+> c.initBuf(buf, handle, reqCapacity);
+> ```
+
+```java
+void initBuf(PooledByteBuf<T> buf, long handle, int reqCapacity) {
+  	//handle按照高、低32位拆分开。
+    int memoryMapIdx = (int) handle;
+    int bitmapIdx = (int) (handle >>> Integer.SIZE);
+  	//page级别的分配「allocateRun」
+    if (bitmapIdx == 0) {
+        byte val = value(memoryMapIdx);
+        assert val == unusable : String.valueOf(val);
+      	//runOffset(memoryMapIdx) 相对于DirectByteBuffer的偏移量
+      	//runLength(memoryMapIdx) 空间
+        buf.init(this, handle, runOffset(memoryMapIdx), reqCapacity, runLength(memoryMapIdx));
+    } else {
+      	//subpage级别的分配「allocateSubpage」
+        initBufWithSubpage(buf, handle, bitmapIdx, reqCapacity);
+    }
+}
+```
+
+```java
+private void initBufWithSubpage(PooledByteBuf<T> buf, long handle, int bitmapIdx, int reqCapacity) {
+    assert bitmapIdx != 0;
+
+    int memoryMapIdx = (int) handle;
+		//获取subpage
+    PoolSubpage<T> subpage = subpages[subpageIdx(memoryMapIdx)];
+    assert subpage.doNotDestroy;
+    assert reqCapacity <= subpage.elemSize;
+		
+  	//分配
+    buf.init(
+        this, handle,
+      	//runOffset(memoryMapIdx)对于directByteBuff的偏移量
+      	//(bitmapIdx & 0x3FFFFFFF) * subpage.elemSize 已占用的偏移量 「起始位置」
+      	//subpage.elemSize 分配大小
+      	//reqCapacity 申请大小 「规整前实际申请大小」
+        runOffset(memoryMapIdx) + (bitmapIdx & 0x3FFFFFFF) * subpage.elemSize, reqCapacity, subpage.elemSize);
+}
+```
+
+```java
+//PooledUnsafeDirectByteBuf
+void init(PoolChunk<ByteBuffer> chunk, long handle, int offset, int length, int maxLength) {
+    super.init(chunk, handle, offset, length, maxLength);
+  	//物理内存位置
+    initMemoryAddress();
+}
+private void initMemoryAddress() {
+		memoryAddress = PlatformDependent.directBufferAddress(memory) + offset;
+}
+```
+
+***
+
+==chunk节点加入chunkList==
+
+> 从qInit开始，根据当前chunk的使用情况，放入对应的chunkList
+>
+> 顺序：qInit -> q000 -> q025 -> q050 -> q075 -> q100
+
+```java
+void add(PoolChunk<T> chunk) {
+  	//超过上限，后移
+    if (chunk.usage() >= maxUsage) {
+        nextList.add(chunk);
+        return;
+    }
+
+    chunk.parent = this;
+    if (head == null) {
+        head = chunk;
+        chunk.prev = null;
+        chunk.next = null;
+    } else {
+        chunk.prev = null;
+        chunk.next = head;
+        head.prev = chunk;
+        head = chunk;
+    }
+}
+```
+
+***
+
+##### 释放内存release
+
+> 谁最后使用，谁释放
+>
+> 从pipeline的head节点开始读取「创建」，要么从解码器『或自定义解码器』释放，要么从tail节点默认释放。
+>
+> ```java
+> ReferenceCountUtil.release(msg);
+> ```
+
+```java
+public static boolean release(Object msg) {
+  	//ByteBuf默认实现了引用计数接口
+    if (msg instanceof ReferenceCounted) {
+        return ((ReferenceCounted) msg).release();
+    }
+    return false;
+}
+```
+
+> 这个msg经过了两层『包裹』
+>
+> - 内存检测 「默认SimpleLeadAwareByteBuf」
+> - 一层wrap 「SlicedByteBuf」
+>
+> 中间这些跳过不看直接看PoolUnsafeDirectByteBuf的释放方法
+
+```java
+//AbstractReferenceCountedByteBuf
+public final boolean release() {
+  	//获取当前byteBuf的引用计数
+  	//自旋cas -1
+  	//没有引用「可释放」时进行释放。
+    for (;;) {
+        int refCnt = this.refCnt;
+        if (refCnt == 0) {
+            throw new IllegalReferenceCountException(0, -1);
+        }
+
+        if (refCntUpdater.compareAndSet(this, refCnt, refCnt - 1)) {
+            if (refCnt == 1) {
+                deallocate();
+                return true;
+            }
+            return false;
+        }
+    }
+}
+```
+
+```java
+//PooledByteBuf
+protected final void deallocate() {
+    if (handle >= 0) {//说明已经释放过了
+        final long handle = this.handle;
+        this.handle = -1;
+        memory = null;//memory属性置为null
+      	//创建线程是否跟释放线程一致
+        boolean sameThread = initThread == Thread.currentThread();
+        initThread = null;
+      	//释放空间
+        chunk.arena.free(chunk, handle, maxLength, sameThread);
+      	//对象池「回收」ByteBuf对象
+        recycle();
+    }
+}
+```
+
+```java
+//PoolArena
+void free(PoolChunk<T> chunk, long handle, int normCapacity, boolean sameThreads) {
+  	//非池化的chunk直接销毁，比如huge
+    if (chunk.unpooled) {
+        destroyChunk(chunk);//手动调用Cleaner进行销毁
+    } else {
+      	//通线程释放 加入线程独有的cache中
+        if (sameThreads) {
+            PoolThreadCache cache = parent.threadCache.get();
+            if (cache.add(this, chunk, handle, normCapacity)) {
+                // cached so not free it.
+                return;
+            }
+        }
+				//缓存满了就「释放」
+        synchronized (this) {
+            chunk.parent.free(chunk, handle);
+        }
+    }
+}
+```
+
+###### 加入缓存
+
+```java
+//PoolThreadCache
+boolean add(PoolArena<?> area, PoolChunk chunk, long handle, int normCapacity) {
+    MemoryRegionCache<?> cache;
+  	//按切分档位放入三类缓存中 tiny[16,512) small[512,8k) normal[8k,16M]
+    if (area.isTinyOrSmall(normCapacity)) {
+        if (PoolArena.isTiny(normCapacity)) {
+            cache = cacheForTiny(area, normCapacity);
+        } else {
+            cache = cacheForSmall(area, normCapacity);
+        }
+    } else {
+        cache = cacheForNormal(area, normCapacity);
+    }
+    if (cache == null) {
+        return false;
+    }
+  	//缓存添加
+  	//创建一个带有chunk和handle的Entry,在数组中新婚徐添加
+    return cache.add(chunk, handle);
+}
+```
+
+```java
+//PoolThreadCache
 
 
+//tiny
+private MemoryRegionCache<?> cacheForTiny(PoolArena<?> area, int normCapacity) {
+    int idx = PoolArena.tinyIdx(normCapacity);
+    if (area.isDirect()) {
+      	//32档获取一个
+        return cache(tinySubPageDirectCaches, idx);
+    }
+    return cache(tinySubPageHeapCaches, idx);
+}
+//small
+private MemoryRegionCache<?> cacheForSmall(PoolArena<?> area, int normCapacity) {
+    int idx = PoolArena.smallIdx(normCapacity);
+    if (area.isDirect()) {
+      	//4档获取一个
+        return cache(smallSubPageDirectCaches, idx);
+    }
+    return cache(smallSubPageHeapCaches, idx);
+}
+//normal
+private MemoryRegionCache<?> cacheForNormal(PoolArena<?> area, int normCapacity) {
+    if (area.isDirect()) {
+      	//4档获取一个 这里按理，应该从8K~16M有12档，但是默认normal档位之后4档
+      	//不明白为啥,可能超过64k不缓存？
+        int idx = log2(normCapacity >> numShiftsNormalDirect);
+        return cache(normalDirectCaches, idx);
+    }
+    int idx = log2(normCapacity >> numShiftsNormalHeap);
+    return cache(normalHeapCaches, idx);
+}
+```
+
+###### chunk释放
+
+> 入口
+>
+> ```java
+> chunk.parent.free(chunk, handle);
+> ```
+
+```java
+void free(PoolChunk<T> chunk, long handle) {
+  	//释放
+    chunk.free(handle);
+  	//释放后小于当前chunklist的最小使用率,就前移比如q050移到q025
+    if (chunk.usage() < minUsage) {
+        remove(chunk);
+        if (prevList == null) {
+            assert chunk.usage() == 0;
+          	//q000前置为null，最小值1%
+          	//也就是使用率如果为0，就真实释放
+            arena.destroyChunk(chunk);
+        } else {
+            prevList.add(chunk);
+        }
+    }
+}
+```
+
+```java
+void free(long handle) {
+    int memoryMapIdx = (int) handle;
+    int bitmapIdx = (int) (handle >>> Integer.SIZE);
+		//找到对应的bitmap，修改为未占用
+    if (bitmapIdx != 0) { // free a subpage
+        PoolSubpage<T> subpage = subpages[subpageIdx(memoryMapIdx)];
+        assert subpage != null && subpage.doNotDestroy;
+        if (subpage.free(bitmapIdx & 0x3FFFFFFF)) {
+            return;
+        }
+    }
+  	//更新剩余长度
+    freeBytes += runLength(memoryMapIdx);
+  	//设置chunk的二叉树节点和父节点
+    setValue(memoryMapIdx, depth(memoryMapIdx));
+    updateParentsFree(memoryMapIdx);
+}
+```
+
+#### Recycler对象池
+
+> 为了减少对象频繁创建与销毁，减少GC压力。netty使用了Recycler对象池。
+
+##### 使用
+
+###### 示例
+
+```java
+@Slf4j
+public class RecyclerTest {
+
+  	//定义一个Recycler对象池，对象类型为DataObject
+  	//重写newObject对象创建方法。
+    public static final Recycler<DataObject> recycler = new Recycler<DataObject>() {
+        @Override
+        protected DataObject newObject(Handle<DataObject> handle) {
+            return new DataObject(handle);
+        }
+    };
+
+  	//测试
+    @Test
+    public void test() {
+        DataObject data0 = recycler.get();
+
+        data0.recycle();//data0回收
+
+        DataObject data1 = recycler.get();
+				DataObject data2 = recycler.get();
+      
+        assert data0 == data1;//相同
+      	assert data1 != data2;//不相同
+    }
+
+}
+
+//自定义POJOclass
+//带有Recycler.Handle处理器
+//handle跟pojo是一对一关系
+@Data
+@RequiredArgsConstructor
+class DataObject {
+    @NonNull
+    private Recycler.Handle<DataObject> handle;
+
+
+    public void recycle() {
+        this.handle.recycle(this);
+    }
+}
+```
+
+###### netty的byteBuf对象池
+
+> 入口
+>
+> ```java
+> PooledByteBuf<T> buf = newByteBuf(maxCapacity);
+> ```
+>
+> ```java
+> //PoolArena
+> protected PooledByteBuf<ByteBuffer> newByteBuf(int maxCapacity) {
+>     if (HAS_UNSAFE) {
+>         return PooledUnsafeDirectByteBuf.newInstance(maxCapacity);
+>     } else {
+>         return PooledDirectByteBuf.newInstance(maxCapacity);
+>     }
+> }
+> ```
+>
+> ```java
+> //PoolUnsafeDirectByteBuf
+> //对象池
+> private static final Recycler<PooledUnsafeDirectByteBuf> RECYCLER = new Recycler<PooledUnsafeDirectByteBuf>() {
+>   @Override
+>   protected PooledUnsafeDirectByteBuf newObject(Handle<PooledUnsafeDirectByteBuf> handle) {
+>     return new PooledUnsafeDirectByteBuf(handle, 0);
+>   }
+> };
+> 
+> static PooledUnsafeDirectByteBuf newInstance(int maxCapacity) {
+>   	//对象池获取
+>     PooledUnsafeDirectByteBuf buf = RECYCLER.get();
+>     buf.setRefCnt(1);
+>     buf.maxCapacity(maxCapacity);
+>     return buf;
+> }
+> ```
+>
+> ```java
+> //PoolByteBuf
+> //release时进行回收
+> private void recycle() {
+>   	//回收
+>     recyclerHandle.recycle(this);
+> }
+> ```
+
+##### 源码
+
+
+
+#### 内存泄漏检测
 
