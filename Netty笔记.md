@@ -4808,6 +4808,12 @@ void free(long handle) {
 #### Recycler对象池
 
 > 为了减少对象频繁创建与销毁，减少GC压力。netty使用了Recycler对象池。
+>
+> ![image-20201010155517123](https://gitee.com/wangigor/typora-images/raw/master/Recycler对象池结构.png)
+>
+> - **「A线程」创建的对象被『A线程』回收，放入Stack-A的elements中。**
+> - **「A线程」创建的对象被『B线程』回收，放入Stack-A的WeakOrderQueue-B中。**
+> - **『A线程』创建对象，优先从Stack-A的elements中获取，为空则先在WeakOrderQueue进行部分回收。**
 
 ##### 使用
 
@@ -4907,7 +4913,385 @@ class DataObject {
 
 ##### 源码
 
+###### 属性和构造
 
+
+
+- Recycler
+
+```java
+//线程的id生成器
+private static final AtomicInteger ID_GENERATOR = new AtomicInteger(Integer.MIN_VALUE);
+private static final int OWN_THREAD_ID = ID_GENERATOR.getAndIncrement();
+private static final int DEFAULT_MAX_CAPACITY; //默认最大容量 256*10「2^18」 可通过io.netty.recycler.maxCapacity进行设置
+private static final int INITIAL_CAPACITY; //初始容量 默认256「2^8」
+
+private final int maxCapacity;
+//ThreadLocal thread -> Stack
+private final FastThreadLocal<Stack<T>> threadLocal = new FastThreadLocal<Stack<T>>() {
+  protected Stack<T> initialValue() {
+    return new Stack<T>(Recycler.this, Thread.currentThread(), maxCapacity);
+  }
+};
+```
+
+```java
+//构造 指定最大容量
+protected Recycler(int maxCapacity) {
+    this.maxCapacity = Math.max(0, maxCapacity);
+}
+```
+
+- Stack
+
+```java
+final Recycler<T> parent;//父对象池
+final Thread thread;//所属线程
+private DefaultHandle<?>[] elements; //存放元素
+private final int maxCapacity;//最大容量
+private int size;//已存容量
+
+//指向WeakOrderQueue链表
+private volatile WeakOrderQueue head;
+private WeakOrderQueue cursor, prev;//两个指针
+```
+
+```java
+//构造
+Stack(Recycler<T> parent, Thread thread, int maxCapacity) {
+  	//设置属性
+    this.parent = parent;
+    this.thread = thread;
+    this.maxCapacity = maxCapacity;
+  	//初始化数组
+    elements = new DefaultHandle[Math.min(INITIAL_CAPACITY, maxCapacity)];
+}
+```
+
+- DefaultHandle
+
+```java
+private int lastRecycledId;//上次回收的id 初始0 todo
+private int recycleId;//所属线程id own_thread_id 初始0 todo
+
+private Stack<?> stack;
+private Object value;//目标对象
+```
+
+- WeakOrderQueue
+
+```java
+// 存放的数据链 head -> link -> link <- tail
+private Link head, tail;
+// 指向同一个stack的另一个线程队列
+private WeakOrderQueue next;
+private final WeakReference<Thread> owner; //归属线程的弱引用
+private final int id = ID_GENERATOR.getAndIncrement();//本队列id
+```
+
+```java
+//stack是对象的创建stack
+//thread是对象的回收线程
+WeakOrderQueue(Stack<?> stack, Thread thread) {
+  	//初始化一个16的数组
+    head = tail = new Link();
+  	//保存回收线程的弱引用
+    owner = new WeakReference<Thread>(thread);
+  	//添加到stack的WeakOrderQueue的头结点
+    synchronized (stack) {
+        next = stack.head;
+        stack.head = this;
+    }
+}
+```
+
+- Link
+
+```java
+//固定16长度的DefaultHandle数组
+private final DefaultHandle<?>[] elements = new DefaultHandle[LINK_CAPACITY];
+//读取指针
+private int readIndex;
+private Link next;//组成链表
+```
+
+###### 对象释放
+
+> 先看对象释放，对我们理解对象池结构有帮助。
+>
+> ```java
+> this.handle.recycle(this);
+> ```
+
+```java
+public void recycle(Object object) {
+		//校验 略。
+    Thread thread = Thread.currentThread();
+  
+  	//创建线程和回收线程是同一个线程
+  	//把对象添加进Stack的DefaultHandle集合中。
+    if (thread == stack.thread) {
+        stack.push(this);
+        return;
+    }
+  
+    //获取回收线程对应的WeakOrderQueue
+  	//也就是object「DefaultHandle」被一个stack「线程A」创建
+  	//但是却被线程B或者线程C回收，每一个其他线程回收都对应创建一个WeakOrderQueue，挂在线程A对应的stack的WeakOrderQueue链表下。
+    Map<Stack<?>, WeakOrderQueue> delayedRecycled = DELAYED_RECYCLED.get();
+    WeakOrderQueue queue = delayedRecycled.get(stack);
+    if (queue == null) {
+      	//初始化WeakOrderQueue并放入DELAYED_RECYCLED中
+        delayedRecycled.put(stack, queue = new WeakOrderQueue(stack, thread));
+    }
+  	//添加入队列中
+    queue.add(this);
+}
+```
+
+- 同一线程回收对象
+
+> 直接放入创建stack的DefaultHandle数组中
+>
+> ```java
+> stack.push(this);
+> ```
+
+```java
+void push(DefaultHandle<?> item) {
+  	//说明已经被回收了
+    if ((item.recycleId | item.lastRecycledId) != 0) {
+        throw new IllegalStateException("recycled already");
+    }
+  	//指定recycleId和lastRecycledId为OWN_THREAD_ID「创建线程id」自己设计的自增主键
+    item.recycleId = item.lastRecycledId = OWN_THREAD_ID;
+		
+    int size = this.size;//已存容量
+    if (size >= maxCapacity) {
+        return;//达到最大容量 不存
+      	//不存的意思是不保存进对象池
+      	//而是通过线程执行结束断掉强引用，而被gc回收
+    }
+  	//未达到最大容量，但是数组满了，就翻倍扩容
+    if (size == elements.length) {
+        elements = Arrays.copyOf(elements, Math.min(size << 1, maxCapacity));
+    }
+		//放进数组中
+  	//已存容量+1
+    elements[size] = item;
+    this.size = size + 1;
+}
+```
+
+- 不同线程回收对象
+
+> 不是创建线程进行回收，则放入对应WeakOrderQueue队列
+>
+> ```java
+> queue.add(this);
+> ```
+
+```java
+void add(DefaultHandle<?> handle) {
+  	//上一次回收id设置为回收线程对应的id
+    handle.lastRecycledId = id;
+		//从尾结点开始防止
+    Link tail = this.tail;
+    int writeIndex;
+  	//如果尾结点Link的16数组已经放满了，就新建一个Link放到尾结点继续存放
+    if ((writeIndex = tail.get()) == LINK_CAPACITY) {
+        this.tail = tail = tail.next = new Link();
+        writeIndex = tail.get();//这里获取的是Link父AtomicInteger的值，也就是对应的数组下标。
+    }
+    tail.elements[writeIndex] = handle;
+    handle.stack = null;
+  
+		//设置数组下标
+    tail.lazySet(writeIndex + 1);
+}
+```
+
+> 关于最后这个lazySet要着重说一下。
+>
+> [Doug Lea提交的注释说明](https://bugs.java.com/bugdatabase/view_bug.do?bug_id=6275329)
+>
+> [Netty作者的解释](https://github.com/netty/netty/issues/8215)
+>
+> - 这里做的是一个**非原子的volatile属性**的更新操作。
+>
+> 多线程环境中，先get，再操作，无法保证原子性。那这一步的set和lazySet执行效果一样。
+>
+> - 这本身作为一个**缓存对象**池，回收对象不需要100%的被缓存住。
+>
+> 也就是可以接受，高并发环境下，一些并发入池的对象可以失败，而被GC。
+>
+> - lazySet比set**执行效率高**
+>
+> 「个人理解」volatile属性的赋值，前后有两个内存屏障「前：写内存屏障；后：读内存屏障」。后置的读内存屏障，会阻止指令重排，且通过总线嗅探将其他cpu寄存器缓存对应的缓存值置为失效，在下一次读volatile属性时，重新去内存读取。
+>
+> lazySet则是取消了后置的读内存屏障，保留前置写内存屏障。提高了效率。
+>
+> ```java
+> //测试demo
+> //两个具有volatile的对象
+> volatile AtomicInteger a=new AtomicInteger();
+> volatile AtomicInteger b=new AtomicInteger();
+> 
+> @Test
+> public void testLazySet(){
+> 		//10万次
+>     int count=100000;
+> 
+>     StopWatch watch=new StopWatch();
+> 
+>     watch.start("set");
+>     IntStream.range(0,count).parallel().forEach(item->{
+>       			//set 非原子累加
+>             int temp = a.intValue()+1;
+>             a.set(temp);
+>     });
+>     watch.stop();
+>     watch.start("lazySet");
+>     IntStream.range(0,count).parallel().forEach(item->{
+>       	//lazySet 非原子累加
+>         int temp = b.intValue()+1;
+>         b.lazySet(temp);
+>     });
+>     watch.stop();
+> 
+>   	//结果输出
+>     System.out.println(a);
+>     System.out.println(b);
+>     System.out.println(watch.prettyPrint());
+> 
+> }
+> ```
+>
+> ```log
+> 12587
+> 14712
+> StopWatch '': running time = 65762849 ns
+> ---------------------------------------------
+> ns         %     Task name
+> ---------------------------------------------
+> 061659196  094%  set
+> 004103653  006%  lazySet
+> ```
+>
+> 可以明显看到，lazySet在性能上有10倍以上的提升。
+
+###### 对象创建
+
+> ```java
+> recycler.get()
+> ```
+
+```java
+public final T get() {
+  	//获取threadLocal的对应Stack
+    Stack<T> stack = threadLocal.get();
+  	//弹出一个缓存对象
+    DefaultHandle<T> handle = stack.pop();
+  	//如果要没有就通过子类实现的newObject创建
+  	//并包裹成DefaultHandle
+    if (handle == null) {
+        handle = stack.newHandle();
+        handle.value = newObject(handle);
+    }
+  	//返回实例
+    return (T) handle.value;
+}
+```
+
+```java
+DefaultHandle<T> pop() {
+  	//当前stack大小
+    int size = this.size;
+  	//如果没有，先进行回收操作
+    if (size == 0) {
+        if (!scavenge()) {
+            return null;
+        }
+        size = this.size;
+    }
+  	//从自己的DefaultHandle集合中返回最后一个。
+    size --;
+    DefaultHandle ret = elements[size];
+    if (ret.lastRecycledId != ret.recycleId) {
+        throw new IllegalStateException("recycled multiple times");
+    }
+    ret.recycleId = 0;
+    ret.lastRecycledId = 0;
+    this.size = size;
+    return ret;
+}
+```
+
+```java
+boolean scavenge() {
+  // continue an existing scavenge, if any
+  if (scavengeSome()) {
+    return true;
+  }
+
+  // reset our scavenge cursor
+  prev = null;
+  cursor = head;
+  return false;
+}
+boolean scavengeSome() {
+  	//对WeakOrderQueue进行清理
+  	//找到游标位置，否则从头开始
+    WeakOrderQueue cursor = this.cursor;
+    if (cursor == null) {
+        cursor = head;
+        if (cursor == null) {
+            return false;//当前stack没有WeakOrderQueue，直接返回
+        }
+    }
+
+    boolean success = false;
+    WeakOrderQueue prev = this.prev;
+  	//注意：这个循环不做全部转移。也就是假设当前这个stack有三个其他线程帮他回收了对象，那会有三个WeakOrderQueue
+  	//不需要三个WeakOrderQueue全部转移，保证转移成功可以弹出对象即可。
+    do {
+      	//将当前游标对应的WeakOrderQueue里的DefaultHandle转移到stack中
+      	//这里也不是对WeakOrderQueue的全部转移，而是从头结点head Link开始，能转移成功即返回。
+        if (cursor.transfer(this)) {
+            success = true;
+            break;
+        }
+				//游标下移
+        WeakOrderQueue next = cursor.next;
+      	//如果对应的回收线程执行完成
+        if (cursor.owner.get() == null) {
+          	//且WeakOrderQueue队列有数据
+            if (cursor.hasFinalData()) {
+              	//全部回收至stack数组中
+                for (;;) {
+                    if (cursor.transfer(this)) {
+                        success = true;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (prev != null) {
+                prev.next = next;
+            }
+        } else {
+            prev = cursor;
+        }
+
+        cursor = next;
+
+    } while (cursor != null && !success);
+
+    this.prev = prev;
+    this.cursor = cursor;
+    return success;
+}
+```
 
 #### 内存泄漏检测
 
