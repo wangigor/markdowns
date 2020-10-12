@@ -1745,11 +1745,11 @@ public abstract class MultithreadEventLoopGroup extends MultithreadEventExecutor
           	//默认初始化一个并行度为nEventExecutors的ForkJoinPool
           	//指定了前缀为nioEventLoopGroup—executorId.getAndIncrement()
           	//工作线程异常处理器使用log.error打印
-          	//异步模式为FIFO「先进先出」
+          	//异步模式为FxieIFO「先进先出」
             executor = newDefaultExecutorService(nEventExecutors);
             shutdownExecutor = true;
         }
-				//初始化线程数组
+				//初始化线程数
         children = new EventExecutor[nEventExecutors];
       
       	//定义线程选择策略
@@ -5295,3 +5295,286 @@ boolean scavengeSome() {
 
 #### 内存泄漏检测
 
+> 前面讲到，ByteBuf分配完成之后，会通过
+>
+> ```java
+> toLeakAwareBuffer(buf)
+> ```
+>
+> 对buf进行包裹，加入泄漏检测。
+>
+> **检查ByteBuf没有release的情况。**
+
+```java
+protected static ByteBuf toLeakAwareBuffer(ByteBuf buf) {
+    ResourceLeak leak;
+  	//检测等级
+  	//可以通过io.netty.leakDetectionLevel参数设置
+  	//默认使用Level.SIMPLE
+    switch (ResourceLeakDetector.getLevel()) {
+        //简单模式
+        case SIMPLE:
+            leak = AbstractByteBuf.leakDetector.open(buf);
+            if (leak != null) {
+                buf = new SimpleLeakAwareByteBuf(buf, leak);
+            }
+            break;
+        //增强模式 跟偏执模式一样
+        //但是检测抽样频率和简单模式一样。113个对象创建抽取一次。
+        //调用栈记录和偏执模式一样。每次都记录。记录创建。
+        case ADVANCED:
+        //偏执模式
+        case PARANOID:
+            leak = AbstractByteBuf.leakDetector.open(buf);
+            if (leak != null) {
+                buf = new AdvancedLeakAwareByteBuf(buf, leak);
+            }
+            break;
+    }
+    return buf;
+}
+```
+
+##### ResourceLeak追踪资源对象
+
+```java
+public interface ResourceLeak {
+    //记录资源对象ByteBuf的当前调用堆栈信息
+    void record();
+
+    //记录资源对象ByteBuf的当前调用堆栈信息 附加信息
+    void record(Object hint);
+
+    //关闭泄漏，不发出告警
+    boolean close();
+}
+```
+
+> ResourceLeakDetector探测器对它进行了默认实现
+
+```java
+//继承了ResourceLeak接口
+//是虚引用的子类实现 对象被gc时加入到refQueue中
+private final class DefaultResourceLeak extends PhantomReference<Object> implements ResourceLeak {
+
+    private static final int MAX_RECORDS = 4;
+
+  	//资源对象创建时的堆栈记录 「增强和偏执型」
+    private final String creationRecord;
+  	//数组实现的双端队列
+    private final Deque<String> lastRecords = new ArrayDeque<String>();
+    private final AtomicBoolean freed;//对象是否已被回收
+  
+  	//链表 存储所有追踪对象
+    private DefaultResourceLeak prev;
+    private DefaultResourceLeak next;
+
+  	//构造
+    DefaultResourceLeak(Object referent) {
+      	//加入引用队列refQueue
+        super(referent, referent != null? refQueue : null);
+
+      	//对象未被回收
+        if (referent != null) {
+            Level level = getLevel();
+          	//增强和偏执级别 记录创建栈信息
+            if (level.ordinal() >= Level.ADVANCED.ordinal()) {
+                creationRecord = newRecord(null, 3);
+            } else {
+                creationRecord = null;
+            }
+						//初始链表的头结点
+            synchronized (head) {
+                prev = head;
+                next = head.next;
+                head.next.prev = this;
+                head.next = this;
+                active ++;
+            }
+            freed = new AtomicBoolean();
+        } else {
+          	//对象被gc回收
+            creationRecord = null;
+            freed = new AtomicBoolean(true);
+        }
+    }
+		
+    public void record() {
+        record0(null, 3);
+    }
+
+    public void record(Object hint) {
+        record0(hint, 3);
+    }
+		//recordsToSkip忽略的栈顶深度 3
+  	//就是忽略record、record0、newRecord，只记录到业务调用处。
+    private void record0(Object hint, int recordsToSkip) {
+        if (creationRecord != null) {
+          	//创建栈信息记录
+            String value = newRecord(hint, recordsToSkip);
+						
+          	//调用栈信息记录 在双端队列尾部插入
+            synchronized (lastRecords) {
+                int size = lastRecords.size();
+                if (size == 0 || !lastRecords.getLast().equals(value)) {
+                    lastRecords.add(value);
+                }
+              	//超过最大记录数，从队列头部移除一个
+              	//默认保存4条记录。
+                if (size > MAX_RECORDS) {
+                    lastRecords.removeFirst();
+                }
+            }
+        }
+    }
+
+    public boolean close() {
+      	//手动改为已释放
+        if (freed.compareAndSet(false, true)) {
+            synchronized (head) {
+                active --;
+                prev.next = next;
+                next.prev = prev;
+                prev = null;
+                next = null;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    //略
+    public String toString() {}
+}
+```
+
+> 记录调用栈信息
+>
+> 就是调用栈toString的过程，只是过滤不需要记录的信息。
+
+```java
+static String newRecord(Object hint, int recordsToSkip) {
+    StringBuilder buf = new StringBuilder(4096);
+
+    // 记录对象
+    if (hint != null) {
+        buf.append("\tHint: ");
+        if (hint instanceof ResourceLeakHint) {
+            buf.append(((ResourceLeakHint) hint).toHintString());
+        } else {
+            buf.append(hint);
+        }
+        buf.append(NEWLINE);//换行
+    }
+
+    // 记录调用栈信息
+    StackTraceElement[] array = new Throwable().getStackTrace();
+    for (StackTraceElement e: array) {
+      	//过滤栈顶recordsToSkip条
+        if (recordsToSkip > 0) {
+            recordsToSkip --;
+        } else {
+            String estr = e.toString();
+
+            //忽略不需要记录的调用栈
+          	//"io.netty.util.ReferenceCountUtil.touch("
+            //"io.netty.buffer.AdvancedLeakAwareByteBuf.touch("
+            //"io.netty.buffer.AbstractByteBufAllocator.toLeakAwareBuffer("
+            boolean excluded = false;
+            for (String exclusion: STACK_TRACE_ELEMENT_EXCLUSIONS) {
+                if (estr.startsWith(exclusion)) {
+                    excluded = true;
+                    break;
+                }
+            }
+
+            if (!excluded) {
+                buf.append('\t');
+                buf.append(estr);
+                buf.append(NEWLINE);
+            }
+        }
+    }
+    return buf.toString();
+}
+```
+
+##### ResourceLeakDetector资源泄漏探测器
+
+```java
+//属性
+
+//活跃对象 量表
+private final DefaultResourceLeak head = new DefaultResourceLeak(null);
+private final DefaultResourceLeak tail = new DefaultResourceLeak(null);
+
+//引用队列
+private final ReferenceQueue<Object> refQueue = new ReferenceQueue<Object>();
+//内存泄漏报告
+//注意这个ConcurrentMap是netty自己封装的 jdk8使用jdk的，8以下使用自己封的
+private final ConcurrentMap<String, Boolean> reportedLeaks = PlatformDependent.newConcurrentHashMap();
+
+private final String resourceType;//对象类型
+private final int samplingInterval;//取样周期 默认113「次」一次
+private final long maxActive;//本类对象的最大活跃数 默认long的最大值
+private long active;//当前对象的活跃数
+private final AtomicBoolean loggedTooManyActive = new AtomicBoolean();//是否打印日志
+
+private long leakCheckCnt;//泄漏检查次数
+```
+
+###### 创建对象探测 open
+
+```java
+public ResourceLeak open(T obj) {
+    Level level = ResourceLeakDetector.level;
+  	//级别为关闭 不创建
+    if (level == Level.DISABLED) {
+        return null;
+    }
+		
+  	//简单和增强级别。有一定的抽样频率。113个对象创建。记录一个。
+    if (level.ordinal() < Level.PARANOID.ordinal()) {
+        if (leakCheckCnt ++ % samplingInterval == 0) {
+            reportLeak(level);//检测
+            return new DefaultResourceLeak(obj);
+        } else {
+            return null;
+        }
+    } else {
+    //偏执级别 每「个」都检测
+        reportLeak(level);//检测
+        return new DefaultResourceLeak(obj);
+    }
+}
+```
+
+###### 泄漏检测 reportLeak
+
+```java
+private void reportLeak(Level level) {
+    //省略
+    for (;;) 
+      	//持续从引用队列中取数据
+      	//被gc的对象就会出现在这里。
+        DefaultResourceLeak ref = (DefaultResourceLeak) refQueue.poll();
+        if (ref == null) {
+            break;
+        }
+
+        ref.clear();
+				//close方法是修改freed值的。
+  			//close第一次返回true，之后都返回false
+  			//release会调用close方法。
+        if (!ref.close()) {
+            continue;//说明之前close过了。
+        }
+				
+  			//没有是放过的。写入reportedLeaks报告中。
+        String records = ref.toString();
+        if (reportedLeaks.putIfAbsent(records, Boolean.TRUE) == null) {
+            //输出报告日志
+        }
+    }
+}
+```
