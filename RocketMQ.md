@@ -640,6 +640,145 @@ public void consumer() throws MQClientException, InterruptedException {
 }
 ```
 
+### 事务消息
+
+> 二段提交思路。
+
+![image-20201202111226875](https://gitee.com/wangigor/typora-images/raw/master/RocketMQ-事务消息流程.png)
+
+>- 发送half消息
+>- 服务端响应half消息写入结果
+>- 根据发送结果，执行本地事务「写入失败，不执行本地事务」
+>- 根据本地事务执行「commit」「rollback」「等待」
+>- 对于「等待」的事物消息，从服务端发起回查
+>- 任意一个同消费者组的producer接收，并返回事务状态。
+>- 根据本地事务回查状态做commit/rollback
+>- 另有一条补偿逻辑：commit、rollback的消息，可以通过endTransaction通知broker，不需要回查。
+
+```java
+@Test
+public void provider() throws MQClientException, InterruptedException {
+	//创建生产者
+  TransactionMQProducer producer = new TransactionMQProducer("transaction_test");
+  AtomicInteger atomicInteger = new AtomicInteger();
+  //创建供事务状态回查的线程池
+  ThreadPoolExecutor poolExecutor = new ThreadPoolExecutor(2, 10, 1, TimeUnit.MINUTES, new ArrayBlockingQueue<>(100), new ThreadFactory() {
+    @Override
+    public Thread newThread(Runnable r) {
+      Thread thread = new Thread(r);
+      thread.setName("transaction_check_thread_" + atomicInteger.incrementAndGet());
+      return thread;
+    }
+  }, new ThreadPoolExecutor.AbortPolicy());
+  producer.setExecutorService(poolExecutor);
+  //设置事务监听器
+  producer.setTransactionListener(new TransactionListenerImpl());
+  producer.setNamesrvAddr("localhost:9876");
+	//启动
+  producer.start();
+	//模拟发送是个事务消息
+  for (int i = 0; i < 10; i++) {
+    Message message = new Message("test_transaction", "tag-1", ("order---" + i).getBytes());
+    log.debug("完成订单{}的组装。", i);
+    TransactionSendResult sendResult = producer.sendMessageInTransaction(message, i);
+    log.info(sendResult.getSendStatus().toString());
+    log.info(sendResult.getLocalTransactionState().toString());
+    TimeUnit.SECONDS.sleep(5);
+  }
+
+  new CountDownLatch(1).await();
+
+}
+
+
+//事务监听器处理两个问题
+//1。half事务发送成功后，本地事务执行。「可以回复UNKNOW等待，或者commit/rollback都可以」
+//2。提供本地事务状态回查方法。「我这里checkLocalTransaction是通过随机数模拟的」
+@Slf4j
+class TransactionListenerImpl implements TransactionListener {
+    @Override
+    public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+
+        //本地事务提交 与half发送代码，在同一个事务「线程」中执行
+        log.debug("{}本地事务执行,arg「{}」", new String(msg.getBody()), arg);
+        return LocalTransactionState.UNKNOW;
+    }
+
+    @Override
+    public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        Random random = new Random();
+        int i = random.nextInt(10);
+        log.info("{}本地事务执行结果：{}", new String(msg.getBody()), i);
+        try {
+            TimeUnit.SECONDS.sleep(i);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        if (i >= 9) return LocalTransactionState.ROLLBACK_MESSAGE;//十分之一的概率回滚
+        if (i <= 3) return LocalTransactionState.COMMIT_MESSAGE;//十分之四的概率提交
+        return LocalTransactionState.UNKNOW;//其他继续等待
+    }
+}
+```
+
+### 延迟消息
+
+> 定时任务，不是指定时间，而是指定延迟等级。
+>
+> 指定特定时间的消息，处理成本高，RocketMQ不支持。
+
+![image-20201202142330360](https://gitee.com/wangigor/typora-images/raw/master/RocketMQ-延迟队列流程.png)
+
+```java
+@Test
+public void producer() throws MQClientException, RemotingException, InterruptedException, MQBrokerException {
+
+    DefaultMQProducer producer = new DefaultMQProducer("schedule_tet");
+    producer.setNamesrvAddr("localhost:9876");
+    producer.start();
+
+    Message message = new Message("test_schedule", "tag-1", "hello schedule message".getBytes());
+		
+  	//设置消息的延迟级别 「不延迟等级为0」
+  	//延迟等级1-18，对应队列0-17
+    //可以从delayLevelTable看到18个延迟等级
+    //1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
+    message.setDelayTimeLevel(2);//延迟5秒
+
+    SendResult result = producer.send(message);
+    log.info(result.getSendStatus().name());
+}
+```
+
+### 消息过滤
+
+> 消息过滤基于两种方式：
+>
+> - **TAG过滤**
+>
+>   常见的**在message创建时指定当前消息tag**和**consumer注册时声明消费的tag集合**。
+>
+> - **SQL92过滤**
+>
+>   SQL92过滤方式是自定义属性过滤，需要在broker开启属性过滤属性。
+>
+>   ```properties
+>   enablePropertyFilter=true
+>   ```
+>
+>   [官网属性过滤](http://rocketmq.apache.org/docs/filter-by-sql92-example/)提供了一些简单demo。
+>
+>   ```java
+>   Message message = new Message("test_filter", "tag_1", "hello".getBytes());
+>   //producer端消息生成时，设置自定义属性
+>   message.putUserProperty("customKey", "3");
+>   ```
+>
+>   ```java
+>   //消费者注册时，设置属性过滤。
+>   consumer.subscribe("test_filter", MessageSelector.bySql("customKey = '3'"));
+>   ```
+
 ## 源码解析
 
 ### NameServer
