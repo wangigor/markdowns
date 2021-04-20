@@ -43,6 +43,11 @@
 - 跳到第一行「**gg**」
 - 进入行编辑模式「**shift + v**」
 - 跳到最后一行「**shift + g**」
-- **shift + :**
-- **+y 回车**
+- **" + y 回车**  
+
+```log
+XXXXX lines yanked into "+
+```
+
+
 
