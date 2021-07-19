@@ -1,0 +1,62 @@
+# @CanIgnoreReturnValue和@CheckReturnValue
+
+这两个注解是由William Pugh提出的[JSR305](https://jcp.org/en/jsr/detail?id=305)关于软件缺陷检查的注解的实现。
+
+引入下面两种依赖都可以。
+
+```xml
+<dependency>
+    <groupId>com.google.errorprone</groupId>
+    <artifactId>error_prone_annotations</artifactId>
+    <version>2.7.1</version>
+</dependency>
+```
+
+```xml
+<dependency>
+    <groupId>com.google.code.findbugs</groupId>
+    <artifactId>jsr305</artifactId>
+    <version>3.0.2</version>
+</dependency>
+```
+
+## 源码
+
+```java
+/**
+ * 返回值可以被忽略
+ * Indicates that the return value of the annotated method can be safely ignored.
+ *
+ * <p>This is the opposite of {@link CheckReturnValue}. It can be used inside classes or packages
+ * annotated with {@code @CheckReturnValue} to exempt specific methods from the default.
+ */
+@Documented
+//注解在类上或者方法上
+@Target({METHOD, TYPE})
+@Retention(CLASS)
+public @interface CanIgnoreReturnValue {}
+```
+
+```java
+/**
+ * 返回值不可忽略
+ * Indicates that the return value of the annotated method must be checked. An error is triggered
+ * when one of these methods is called but the result is not used.
+ *
+ * <p>{@code @CheckReturnValue} may be applied to a class or package to indicate that all methods in
+ * that class or package must have their return values checked. For convenience, we provide an
+ * annotation, {@link CanIgnoreReturnValue}, to exempt specific methods or classes from this
+ * behavior.
+ */
+@Documented
+@Target({METHOD, CONSTRUCTOR, TYPE, PACKAGE})
+@Retention(RUNTIME)
+public @interface CheckReturnValue {}
+```
+
+## demo
+
+<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210719205720638.png" alt="image-20210719205720638" style="zoom:50%;" />
+
+
+
