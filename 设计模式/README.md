@@ -19,3 +19,18 @@
 所以我又买了一门课《设计模式之美》。
 
 这里会放一些笔记和实践。且，把能串起来的部分都串起来。
+
+
+
+***
+
+在此期间：
+
+读了《重构-改善既有代码的设计》这本书
+
+![image-20210914181608427](https://gitee.com/wangigor/typora-images/raw/master/image-20210914181608427.png)
+
+之前在我的印象中，它是一本大部头的技术书籍，可能晦涩难懂。
+
+但是当我翻开它，下定决心开始看的时候。我发现根本不需要下定决心，它一直吸引着你读下去。在Martin Fowler的博客里也有关于书中例子的列表，方便查找：[part of martinfowler.com](https://www.refactoring.com/catalog/).
+
