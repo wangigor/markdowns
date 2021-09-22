@@ -1,5 +1,21 @@
 # git
 
+## 初始化
+
+### 本地初始化
+
+```bash
+# 设置操作人
+git config --global user.email "you@example.com"
+git config --global user.name "your name"
+# 创建工作空间
+mkdir module_name
+# 交由git管理
+git init
+```
+
+
+
 > git remote add 标识名(origin) 远程地址
 >
 > git clone 远程地址
