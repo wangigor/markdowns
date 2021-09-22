@@ -14,21 +14,99 @@ mkdir module_name
 git init
 ```
 
+## 工作区-暂存-版本库
+
+> ==todo==示例截图
+
+```bash
+# 工作区到工作检测区
+git status
+# 版本库提交版本号查询
+git log
+# 版本库历史版本查询「能查到reset之后的记录」
+git reflog
+```
+
+### 工作区-暂存
+
+```bash
+# 单个文件提交到暂存
+git add 文件名
+# 整个目录提交到暂存
+git add .
+# 匹配的文件提交到暂存
+git add 表达式
+```
+
+```bash
+# 暂存回到工作区检测
+git reset HEAD --文件名
+```
+
+```bash
+# 从工作区检测撤回文件修改
+git checkout 文件名
+```
+
+### 暂存-版本库
+
+```bash
+# 暂存提交到版本库
+git commit -m '版本描述'
+```
+
+```bash
+# 版本库回滚到暂存
+git reset --soft 版本号
+```
+
+### 工作区-暂存区-版本库
+
+```bash
+# 版本库回滚到工作区检测
+git reset --mix 版本号
+# 等价于
+git reset --soft 版本号
+git reset HEAD
+```
+
+```bash
+# 版本库回滚到工作区
+git reset --hard 版本号
+# 等价于
+git reset --mix 版本号
+git checkout 文件名
+```
+
+举例：假设commit了两个版本到版本库`v1`和`v2`
+
+- 想要从`v2`回退到`v1`
+
+  ```bash
+  # 查询v1版本号
+  git log
+  # 直接回滚到工作区
+  git reset --hard 版本号
+  ```
+
+- 想要再从`v1`撤销回退到`v2`
+
+  ```bash
+  # 查询v2版本号
+  git reflog
+  # 按照版本号回滚到工作区
+  git reset --hard 版本号
+  ```
+
 
 
 > git remote add 标识名(origin) 远程地址
 >
 > git clone 远程地址
 >
-> Git add
->
 > Git push origin master
 >
 > Git pull origin master
->
-> git commit -m "版本描述"
->
-> Git init
 >
 > Git branch
 >
