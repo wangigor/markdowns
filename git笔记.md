@@ -51,9 +51,24 @@ git reset HEAD --文件名
 ```
 
 ```bash
-# 从工作区检测撤回文件修改
+#「已停用」 从工作区检测撤回文件修改
 git checkout 文件名
 ```
+
+> `git checkout 文件名`从暂存区撤回的方式已停用。
+>
+> ![image-20210924144110451](https://gitee.com/wangigor/typora-images/raw/master/image-20210924144110451.png)
+>
+> 需要使用
+>
+> ```bash
+> # 从暂存区撤回
+> git rm --cached <文件>…
+> ```
+>
+> <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210924144223461.png" alt="image-20210924144223461" style="zoom:50%;" />
+
+
 
 ### 暂存-版本库
 
