@@ -47,22 +47,22 @@ git add 表达式
 
 ```bash
 # 暂存回到工作区检测
-git reset HEAD --文件名
+git reset HEAD -- 文件名
 ```
 
 ```bash
 #「已停用」 从工作区检测撤回文件修改
-git checkout 文件名
+git checkout -- 文件名
 ```
 
-> `git checkout 文件名`从暂存区撤回的方式已停用。
+> `git checkout -- 文件名`是为了撤销修改，目标文件是会回滚到原状态的。
+>
+> 而`git rm --cached 文件名`只是不提交到暂存区。
 >
 > ![image-20210924144110451](https://gitee.com/wangigor/typora-images/raw/master/image-20210924144110451.png)
 >
-> 需要使用
->
 > ```bash
-> # 从暂存区撤回
+> # 从暂存区撤回「但本地文件系统保留对文件修改」
 > git rm --cached <文件>…
 > ```
 >
@@ -97,7 +97,7 @@ git reset HEAD
 git reset --hard 版本号
 # 等价于
 git reset --mix 版本号
-git checkout 文件名
+git checkout -- 文件名
 ```
 
 举例：假设commit了两个版本到版本库`v1`和`v2`
@@ -107,6 +107,7 @@ git checkout 文件名
   ```bash
   # 查询v1版本号
   git log
+  
   # 直接回滚到工作区
   git reset --hard 版本号
   ```
@@ -120,7 +121,7 @@ git checkout 文件名
   git reset --hard 版本号
   ```
 
-
+> 退出`git log`和`git reflog`，按`q`即可。
 
 > git remote add 标识名(origin) 远程地址
 >
