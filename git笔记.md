@@ -14,6 +14,13 @@ mkdir module_name
 git init
 ```
 
+### 撤销init
+
+```bash
+# 撤销git init
+rm -rf .git
+```
+
 ## 工作区-暂存-版本库
 
 > ==todo==示例截图
