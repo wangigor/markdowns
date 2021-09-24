@@ -123,6 +123,39 @@ git checkout -- 文件名
 
 > 退出`git log`和`git reflog`，按`q`即可。
 
+### 版本描述修改
+
+> 也就是`git commit -m '错误的信息描述'`，想要修改这个「错误的信息描述」。
+
+有两种方式
+
+- 一种方式是从「版本库」回退到「暂存区」，然后重新提交
+
+  ```bash
+  git reset --soft HEAD^
+  git commit -m '正确的信息描述'
+  ```
+
+  > `HEAD^`标识上一个版本
+  >
+  > `HEAD^^`表示上两个版本「上上个版本」
+  >
+  > 也可以使用`HEAD~1`、`HEAD~2`的方式进行上面的操作。
+
+- 另一种方式是「直接修改」
+
+  ```bash
+  git commit --amend
+  ```
+
+  进入当前版本描述，修改保存
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210924155350672.png" alt="image-20210924155350672" style="zoom:50%;" />
+
+  保存退出即可。
+
+
+
 > git remote add 标识名(origin) 远程地址
 >
 > git clone 远程地址
@@ -160,30 +193,3 @@ git checkout -- 文件名
 （7）**git stash drop** stash@{\$num} ：丢弃stash@{\$num}存储，从列表中删除这个存储
 
 （8）`**git stash clear** ：`删除所有缓存的stash
-
-
-
-## 撤销commit
-
-> 本地修改了文件，执行了
->
-> ```bash
-> git add file
-> git commit -m "修改原因"
-> ```
->
-> 但是没有push，如何撤销commit
-
-```bash
-git reset --soft HEAD^
-```
-
-可以重置上一次commit操作，但是没有撤销add「没有删除工作空间的修改文件」，如果需要撤销add，可以使用--hard。
-
-「HEAD^」表示上一个版本。也可以写成HEAD\~1。如果想要撤销两次commit，使用HEAD\~2。
-
-```bash
-git commit --amend
-```
-
-也可以使用这个命令进入vim直接修改。
