@@ -55,7 +55,8 @@ git reset HEAD -- 文件名
 ```
 
 ```bash
-#「已停用」 从工作区检测撤回文件修改
+# 从工作区检测撤回文件修改
+# 这个--很重要。如果不加--，就变成了「切换到另一分支」命令
 git checkout -- 文件名
 ```
 
@@ -160,25 +161,74 @@ git checkout -- 文件名
 
 
 
-> git remote add 标识名(origin) 远程地址
->
-> git clone 远程地址
->
-> Git push origin master
->
-> Git pull origin master
->
-> Git branch
->
-> git checkout 分支名
->
-> git log 「--oneline」--graph
->
-> git merge 分支 合并分支
->
-> git merge 分支
->
-> 
+## 分支管理
+
+### 创建、查看、切换、删除
+
+```bash
+# 查看分支
+git branch
+```
+
+```bash
+# 创建分支
+# 从哪个分支创建的分支，就会原样拷贝原分支
+git branch 分支名
+```
+
+```bash
+# 切换分支
+git checkout 分支名
+# 或者
+git switch 分支名
+```
+
+```bash
+# 创建并切换至分支
+git branch -b 分支名
+# 等价于
+git branch 分支名
+git checkout 分支名
+```
+
+```bash
+# 删除分支
+git branch -d 分支名
+```
+
+***
+
+git有几种图示分支的方式
+
+- `git log --graph --all`
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925214959557.png" alt="image-20210925214959557" style="zoom:50%;" />
+
+  如果想要查看更加简介的版本可以增加`--oneline`参数
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925215145244.png" alt="image-20210925215145244" style="zoom:50%;" />
+
+- 使用git gui
+
+  ```bash
+  gitk --all
+  ```
+
+  ![image-20210925215412806](https://gitee.com/wangigor/typora-images/raw/master/image-20210925215412806.png)
+
+### 合并
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -196,4 +246,4 @@ git checkout -- 文件名
 
 （7）**git stash drop** stash@{\$num} ：丢弃stash@{\$num}存储，从列表中删除这个存储
 
-（8）`**git stash clear** ：`删除所有缓存的stash
+（8）**git stash clear** ：删除所有缓存的stash
