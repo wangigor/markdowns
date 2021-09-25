@@ -218,6 +218,44 @@ git有几种图示分支的方式
 
 ### 合并
 
+分支合并分为三种方式merge、rebase、cherry-pick。下面将一一介绍。
+
+### merge
+
+merge也有三种方式fast-forward、no-ff、squash。
+
+目的是统一的：「比如A分支要去合并B分支的代码，会在A分支上产生**一个**新版本」。
+
+但是三个却有不同，下面一一来看。
+
+- fast-forward
+
+  如果B分支「被合并分支」在在当前分支的下游「没有分叉」，默认使用快速合并。
+
+  举例：在dev分支新提交文件dev.txt。
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925221856232.png" alt="image-20210925221856232" style="zoom:50%;" />
+
+  在master进行合并。
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222328409.png" alt="image-20210925222328409" style="zoom:50%;" />
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222648536.png" alt="image-20210925222648536" style="zoom:50%;" />
+
+  这两个分支的id是一样的。在删除了dev分支之后，不会留下dev的记录「他就跟在master上提交了一个新版本一模一样。」
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222918156.png" alt="image-20210925222918156" style="zoom:50%;" />
+
+  画张图标识就是这样。
+
+  ![image-20210925223624257](https://gitee.com/wangigor/typora-images/raw/master/image-20210925223624257.png)
+
+  
+
+#### rebase
+
+#### cherry-pick
+
 
 
 
