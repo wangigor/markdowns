@@ -228,29 +228,49 @@ merge也有三种方式fast-forward、no-ff、squash。
 
 但是三个却有不同，下面一一来看。
 
-- fast-forward
+- **fast-forward**
 
   如果B分支「被合并分支」在在当前分支的下游「没有分叉」，默认使用快速合并。
 
   举例：在dev分支新提交文件dev.txt。
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925221856232.png" alt="image-20210925221856232" style="zoom:50%;" />
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925221856232.png" alt="image-20210925221856232"  />
 
   在master进行合并。
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222328409.png" alt="image-20210925222328409" style="zoom:50%;" />
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222328409.png" alt="image-20210925222328409"  />
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222648536.png" alt="image-20210925222648536" style="zoom:50%;" />
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222648536.png" alt="image-20210925222648536"  />
 
   这两个分支的id是一样的。在删除了dev分支之后，不会留下dev的记录「他就跟在master上提交了一个新版本一模一样。」
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222918156.png" alt="image-20210925222918156" style="zoom:50%;" />
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222918156.png" alt="image-20210925222918156"  />
 
   画张图标识就是这样。
 
   ![image-20210925223624257](https://gitee.com/wangigor/typora-images/raw/master/image-20210925223624257.png)
 
-  
+- no-ff
+
+  ```bash
+  git merge --no-ff branch1
+  ```
+
+  ![image-20210925224903267](https://gitee.com/wangigor/typora-images/raw/master/image-20210925224903267.png)
+
+  下面这张图展示了合并过程。
+
+  ![image-20210925224539575](https://gitee.com/wangigor/typora-images/raw/master/image-20210925224539575.png)
+
+  它会在合并分支「master」上创建一个新合并版本「Merge：m3」。
+
+  master的log是这样的：
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925224713304.png" alt="image-20210925224713304"  />
+
+  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925224809895.png" alt="image-20210925224809895"  />
+
+  **branch1分支删除之后，master的记录依然存在。**
 
 #### rebase
 
