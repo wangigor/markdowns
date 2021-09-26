@@ -547,3 +547,26 @@ git merge FETCH_HEAD
 
 ![image-20210926144730280](https://gitee.com/wangigor/typora-images/raw/master/image-20210926144730280.png)
 
+
+
+## 标签
+
+> 标签呢。可以理解为`commitHash`的传播版本「昨天晚上上线的commitHash是「f0d6c5fb0a177f6d765ceca812aeaa033cbf547d」，肯定不好理解与传播。」，可以把当前一个版本标记为人类能够看懂或者方便记录的版本号。
+
+![image-20210926150127585](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150127585.png)
+
+比如刚才的`f0d6c5fb0a177f6d765ceca812aeaa033cbf547d`就可以标记为`v1.0.0`版。
+
+```bash
+git tag -a v1.0.0
+```
+
+需要填写这个标签的描述信息。
+
+![image-20210926150411193](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150411193.png)
+
+保存之后，就有了版本号。
+
+![image-20210926150526306](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150526306.png)
+
+也可以通过`git tag`查看所有标签。
