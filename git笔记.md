@@ -220,7 +220,7 @@ git有几种图示分支的方式
 
 分支合并分为三种方式merge、rebase、cherry-pick。下面将一一介绍。
 
-### merge
+#### merge
 
 merge也有三种方式fast-forward、no-ff、squash。
 
@@ -250,7 +250,7 @@ merge也有三种方式fast-forward、no-ff、squash。
 
   ![image-20210925223624257](https://gitee.com/wangigor/typora-images/raw/master/image-20210925223624257.png)
 
-- no-ff
+- **no-ff**
 
   ```bash
   git merge --no-ff branch1
@@ -272,7 +272,29 @@ merge也有三种方式fast-forward、no-ff、squash。
 
   **branch1分支删除之后，master的记录依然存在。**
 
+- **squash**
+
+  这个选项就是把之前的分支合并操作分为两步：①先**把待分支代码拉取到本地**。②在合并分支自行提交。
+
+  ![image-20210926092141782](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092141782.png)
+
+  提交完成之后，只有master的一条记录「branch1合并记录不保留」。
+
+  ![image-20210926092350309](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092350309.png)
+
+  graph图中能看到这个合并操作是断开的「分支`4c1b25c`和master `a8a3742`没有连接」。
+
+  ![image-20210926092602588](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092602588.png)
+
+  squash的流程是下面这样：
+
+  ![image-20210926093112397](https://gitee.com/wangigor/typora-images/raw/master/image-20210926093112397.png)
+
+  可以理解为master拉取了`d1`分支的提交代码，以master的身份进行了提交「当然这里如果相对记录进行继续操作，当然可以」。
+
 #### rebase
+
+
 
 #### cherry-pick
 
