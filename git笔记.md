@@ -329,6 +329,60 @@ git rebase -i HEAD~3
 
 ![image-20210926100215341](https://gitee.com/wangigor/typora-images/raw/master/image-20210926100215341.png)
 
+##### 不同分支合并
+
+<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210926112527070.png" alt="image-20210926112527070" style="zoom:50%;" />
+
+最初，从`m2`版本开始，出现了不同的两个分支`m3「master」`和`d1「dev」`。下面进行合并。
+
+- 先在待合并分支「dev」进行**变基**操作。
+
+  ```bash
+  # 切换到待合并分支
+  git checkout dev
+  # 变基「也就是把dev的分叉节点改到master的m3」
+  git rebase master
+  ```
+
+- 第二步就是**冲突解决**。
+
+  > 我这里模拟了一个冲突。
+  >
+  > dev分支「branch1」上之前的d1版本是「**9b105b** function01完整代码」
+  >
+  > 又在master上提交了新的修改版本「**80837f5** master_function_01」
+
+  ![image-20210926105733871](https://gitee.com/wangigor/typora-images/raw/master/image-20210926105733871.png)
+
+  在rebase的时候因为`branch1`文件产生了冲突。按照提示执行即可。
+
+  - 手动解决冲突。
+  - `git add/rm <confilicted_files>`
+  - `git rebase --continue`
+
+  如果要放弃这次变基操作，可以执行`git rebase --abort`
+
+  经过这一步之后branch1就完成了rebase「基节点改到了`m3「80837f5 master_function_01」`」。
+
+  而之前的d1版本「**9b105b** function01完整代码」也发生了改变。
+
+  ![image-20210926112112898](https://gitee.com/wangigor/typora-images/raw/master/image-20210926112112898.png)
+
+  「**9b105b** function01完整代码」变成了「**f298175** function01完整代码」
+
+  ![image-20210926112603093](https://gitee.com/wangigor/typora-images/raw/master/image-20210926112603093.png)
+
+- 最后一步是**合并**。
+
+  ```bash
+  # 切换回合并分支
+  git checkout master
+  # 进行合并「fast-forward」
+  git merge branch1
+  ```
+
+  ![image-20210926113101579](https://gitee.com/wangigor/typora-images/raw/master/image-20210926113101579.png)
+
 
 
 #### cherry-pick
