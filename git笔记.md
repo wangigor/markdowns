@@ -570,3 +570,13 @@ git tag -a v1.0.0
 ![image-20210926150526306](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150526306.png)
 
 也可以通过`git tag`查看所有标签。
+
+不过，到目前远程版本库还不知道有这一个tag信息的「`v1.0.0`这个tag只存在于本地」，需要手动推送。
+
+```bash 
+git push origin --tags
+```
+
+![image-20210926151017553](https://gitee.com/wangigor/typora-images/raw/master/image-20210926151017553.png)
+
+![image-20210926151046348](https://gitee.com/wangigor/typora-images/raw/master/image-20210926151046348.png)
