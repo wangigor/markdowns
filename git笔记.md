@@ -383,13 +383,71 @@ git rebase -i HEAD~3
 
   ![image-20210926113101579](https://gitee.com/wangigor/typora-images/raw/master/image-20210926113101579.png)
 
-
-
 #### cherry-pick
 
+它的作用就是讲指定的提交哈希应用于当前分支。
 
+```bash
+git cherry-pick <commitHash>
+```
 
+比如，两个人同时开发不同功能模块。但是在一些基础模块可以复用。那么可以使用cherry-pick把基础模块提交的commitHash合并到本地分支。
 
+![image-20210926134027607](https://gitee.com/wangigor/typora-images/raw/master/image-20210926134027607.png)
+
+`d1`需要优先于`d2`提交。
+
+也可以一次pick多个提交
+
+```bash
+# HashA 和 HashB 一起pick
+git cherry-pick <HashA> <HashB>
+# 提交HashA到HashB之间的所有 (HashA,HashB]
+git cherry-pick HashA..HashB
+# 如果要pick[HashA,HashB]闭区间
+git cherry-pick HashA^..HashB
+```
+
+cherry-pick有一些常用配置项。
+
+- `-e`/`--edit`
+
+  打开外部编辑器，编辑提交信息
+
+- `-n`/`--no-commit`
+
+  只更新本地文件和暂存区，不产生新提交。
+
+- `-x`
+
+  在提交信息的末尾追加一行「cherry picked from commit ...」，方便后续追踪。
+
+- `-s`/`--signoff`
+
+  在提交信息的末尾追加一行操作者的签名。
+
+- `-m`/`--mainline`
+
+  如果commit是一个合并节点「来自于两个分支的合并」，cherry-pick默认会失败，因为不知道应该采用哪个分支的代码改动。
+
+  ```bash
+  # cherry-pick采用commitHash中编号1的分支改动
+  git cherry-pick -m 1 <commitHash>
+  ```
+
+  一般来说1号标识接收改动的分支，2号分支是被合并分支「改动来源」。
+
+当发生冲突后，cherry-pick跟rebase的操作方式是一样的。
+
+- cherry-pick会先停下来。
+
+- 解决冲突之后，手动将文件加入暂存区`git add <conflictFile>`。
+
+  然后`git cherry-pick --continue`让它继续。
+
+- 或者采用`--abort`放弃合并，文件还原。
+
+- 或者`--quit`，退出cherry-pick。但不还原文件。
 
 
 
