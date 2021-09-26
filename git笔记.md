@@ -391,7 +391,7 @@ git rebase -i HEAD~3
 git cherry-pick <commitHash>
 ```
 
-比如，两个人同时开发不同功能模块。但是在一些基础模块可以复用。那么可以使用cherry-pick把基础模块提交的commitHash合并到本地分支。
+比如，一个人同时开发不同功能模块，创建了两个分支。但是在一些基础模块可以复用。那么可以使用cherry-pick把基础模块提交的commitHash合并到本地分支。
 
 ![image-20210926134027607](https://gitee.com/wangigor/typora-images/raw/master/image-20210926134027607.png)
 
@@ -449,12 +449,6 @@ cherry-pick有一些常用配置项。
 
 - 或者`--quit`，退出cherry-pick。但不还原文件。
 
-
-
-
-
-
-
 ### 工作区暂存
 
 > 工作区暂存和暂存区不一样的。
@@ -474,4 +468,82 @@ cherry-pick有一些常用配置项。
 |  **git stash drop **stash@{\$num}   | 丢弃stash@{\$num}存储，从列表中删除这个存储                  |
 |         **git stash clear**         | 删除所有缓存的stash                                          |
 
+### 远程协同
+
+> 前面的版本库是本地的版本库，它只存在于我的电脑里。
+>
+> 当团队中的不同成员进行协同开发时，就会进行远程系统。
+>
+> 他需要一个远程的代码仓库『而不是只在我的电脑上』，比如github、gitee或者公司/团队自建的gitlib……
+
+比如我就在gitee上创建了远程仓库「用于git操作实战」
+
+![image-20210926141944483](https://gitee.com/wangigor/typora-images/raw/master/image-20210926141944483.png)
+
+第一步就是**把本地的代码库和远程代码库进行关联**。
+
+```bash
+# origin可以自己命名，可以理解为远程库的代称
+git remote add origin https://gitee.com/wangigor/git_test.git
+```
+
+关联之后可以使用
+
+```bash
+# 查看远程库的信息
+git remote
+# 查看远程库的详细信息
+git remote -v
+```
+
+![image-20210926142800044](https://gitee.com/wangigor/typora-images/raw/master/image-20210926142800044.png)
+
+可以在本地分支上手动指定远程分支名称
+
+```bash
+git branch --set-upstream-tp=origin/<远程分支名> 本地分支名
+```
+
+默认两个分支名是一样的。
+
+***
+
+然后就是**把本地版本库推送到远程**。
+
+> 比如要把master分支推送到远程master。
+
+```bash
+# 切换到master分支
+git checkout master
+# 本地版本库推送到远程
+git push origin master
+```
+
+如果，其他人有提交过这个分支的代码，就会出现冲突。
+
+先把远程库代码拉倒本地解决冲突然后提交。
+
+***
+
+从远程库同步到本地库。
+
+```bash
+# 把远程master分支拉倒当前分支的版本库
+git pull origin master
+# 或者 把远程版本库的全部分支更新都拉回本地
+git pull origin
+# 完整版
+git pull <远程库名称> <远程分支名>:<本地分支名>
+```
+
+`git pull origin master`就等价于
+
+```bash
+git fetch origin master
+git merge FETCH_HEAD
+```
+
+这个`FETCH_HEAD`就是远程HEAD，可以通过`git log -p FETCH_HEAD`查看。
+
+![image-20210926144730280](https://gitee.com/wangigor/typora-images/raw/master/image-20210926144730280.png)
 
