@@ -294,6 +294,41 @@ merge也有三种方式fast-forward、no-ff、squash。
 
 #### rebase
 
+rebase的合并方式稍有不同，不止可以合并分支代码，它还包括了本地代码的版本合并「**同分支多版本合并**」。
+
+##### 同分支多版本合并
+
+假设有一个大功能，每天都会提交一点点代码。但是想在代码提交时只显示一个融合版本。
+
+![image-20210926094910426](https://gitee.com/wangigor/typora-images/raw/master/image-20210926094910426.png)
+
+> 目前在分支上就有一个功能的多次提交记录。
+
+现在对这三个记录进行合并。
+
+```bash
+# 对当前分支的最近三个版本进行合并
+git rebase -i HEAD~3
+```
+
+- 第一步就是三个版本的代码融合
+
+  ![image-20210926095544404](https://gitee.com/wangigor/typora-images/raw/master/image-20210926095544404.png)
+
+  以第一个版本作为提交版本，其余「pick改为s的版本」追加到之前的版本。
+
+- 然后对三个版本设置一个统一的提交版本
+
+  ![image-20210926095924618](https://gitee.com/wangigor/typora-images/raw/master/image-20210926095924618.png)
+
+  保存就提交。
+
+![image-20210926100030242](https://gitee.com/wangigor/typora-images/raw/master/image-20210926100030242.png)
+
+可以在log中看到之前的三条提交版本合并为一个版本。
+
+![image-20210926100215341](https://gitee.com/wangigor/typora-images/raw/master/image-20210926100215341.png)
+
 
 
 #### cherry-pick
