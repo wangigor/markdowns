@@ -28,7 +28,7 @@
 
 读了《重构-改善既有代码的设计》这本书
 
-![image-20210914181608427](https://gitee.com/wangigor/typora-images/raw/master/image-20210914181608427.png)
+![image-20210914181608427](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210914181608427.png)
 
 之前在我的印象中，它是一本大部头的技术书籍，可能晦涩难懂。
 
