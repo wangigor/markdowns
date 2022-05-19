@@ -21,7 +21,7 @@
 > - CAS是基于同一个浏览器的cookie做的多域签发。不能跨浏览器。
 > - jwt是基于同一套token解析做的token跨域传播。可以跨浏览器。
 
-![image-20201109223606920](https://gitee.com/wangigor/typora-images/raw/master/我再试试.png)
+![image-20201109223606920](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/我再试试.png)
 
 ### aaa域登录
 
