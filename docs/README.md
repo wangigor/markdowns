@@ -1,3 +1,5 @@
+# todo
+因为gitee图床外链限制，文档图片正在迁移中...
 # markdowns
 存一些markdown。
 用于记录生涯文档。
