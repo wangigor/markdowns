@@ -297,7 +297,7 @@ static RateLimiter create(
 >
 > 暂介绍到这里，我们先看共同的抽象部分。
 >
-> ![image-20210720155106751](https://gitee.com/wangigor/typora-images/raw/master/image-20210720155106751.png)
+> ![image-20210720155106751](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210720155106751.png)
 
 ## 主要方法
 
@@ -730,7 +730,7 @@ static final class SmoothWarmingUp extends SmoothRateLimiter {
 
 - 稳定期的时间速度就是1s/QPS。在坐标轴上是一条水平的直线。
 
-<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210720163702971.png" alt="image-20210720163702971" style="zoom:50%;" />
+<img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210720163702971.png" alt="image-20210720163702971" style="zoom:50%;" />
 
 中间夹的这个区域就是消耗掉所有storedPermits需要的时间「1s」。
 
@@ -738,7 +738,7 @@ static final class SmoothWarmingUp extends SmoothRateLimiter {
 
 > RateLimiter增加了一个前提，就是默认这个预热是前半个周期。
 
-![image-20210720165623968](https://gitee.com/wangigor/typora-images/raw/master/image-20210720165623968.png)
+![image-20210720165623968](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210720165623968.png)
 
 - 预热限流指定了预热时间warmPeriod，也就是图中的粉红色区域。
 

@@ -56,7 +56,7 @@ public @interface CheckReturnValue {}
 
 ## demo
 
-<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210719205720638.png" alt="image-20210719205720638" style="zoom:50%;" />
+<img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210719205720638.png" alt="image-20210719205720638" style="zoom:50%;" />
 
 
 
