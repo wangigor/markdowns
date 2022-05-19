@@ -1,5 +1,7 @@
 # Skywalking源码解析
 
+> 源码编译参照[官方-How-to-build](https://github.com/apache/skywalking/blob/master/docs/en/guides/How-to-build.md)。
+
 ## 可能遇到的问题
 
 ### 本地编译apm-webapp报错
@@ -24,7 +26,7 @@
 
 如果在```skywalking```进行全部编译，```skywalking/skywalking-agent```目录结构如下
 
-<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210811170452367.png" alt="image-20210811170452367" style="zoom:50%;" />
+<img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210811170452367.png" alt="image-20210811170452367" style="zoom:50%;" />
 
 如果只编译`skywalking/apm-sniffer/apm-agent`是不行的，会缺少`activations、bootstrap-plugins、optional-plugins、plugins`四个文件夹。这就会导致「如果本地改了源码需要debug，增加了启动前编译」的时候，可能重新启动项目插件缺失。就什么也统计不到了。
 
@@ -146,7 +148,6 @@ public class SkyWalkingAgent {
             }
         }, "skywalking service shutdown thread"));
     }
-  	
 }
 ```
 
