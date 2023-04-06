@@ -36,7 +36,7 @@
 
 
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/传统io.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/传统io.png)
 >
 > - JVM发起**read()** native调用，操作系统由**用户态空间切换到内核态空间**。「第一次上下文切换」
 > - 通过DMA引擎将数据从**磁盘拷贝到内核空间缓冲区**内。「第一次拷贝」
@@ -49,20 +49,20 @@
 
 #### mmap
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/mmap.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/mmap.png)
 >
 > [认真分析mmap](https://www.cnblogs.com/huxiao-tee/p/4660352.html)
 >
 > mmap是一种内存映射文件的方法，即将**一个文件或者其它对象映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系。**实现这样的映射关系后，进程**就可以采用指针的方式读写操作这一段内存**，而系统会自动回写脏页面到对应的文件磁盘上，即完成了**对文件的操作而不必再调用read,write等系统调用函数**。相反，内核空间对这段区域的修改也直接反映用户空间，从而可以**实现不同进程间的文件共享**。
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/文件映射.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/文件映射.png)
 
 ```c
 tmp_buf = mmap(file, len);
 write(socket, tmp_buf, len);
 ```
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/5377351-d8e3c35347959291.jpg)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/5377351-d8e3c35347959291.jpg)
 >
 > - mmap系统调用导致**DMA引擎将文件内容复制到内核缓冲区中**。然后**与用户进程共享缓冲区**「减少一次复制」，而不在内核和用户存储器空间之间执行任何复制。
 > - write系统调用导致**内核将数据从原始内核缓冲区复制到与套接字相关联的内核缓冲区**中。
@@ -89,7 +89,7 @@ write(socket, tmp_buf, len);
 
 #### sendfile
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/sendfile.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/sendfile.png)
 >
 > 没有用户态和内核态的数据复制。减少上下文切换次数。
 >
@@ -101,7 +101,7 @@ write(socket, tmp_buf, len);
 >
 > 根据以上过程，一共有2次的上下文切换，3次的I/O拷贝。我们看到从用户空间到内核空间并没有出现数据拷贝，从操作系统角度来看，这个就是**零拷贝**。内核空间出现了复制的原因: 通常的硬件在通过DMA访问时期望的是连续的内存空间。
 
-![img](https://gitee.com/wangigor/typora-images/raw/master/scatter-gather-sendfile.png)
+![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/scatter-gather-sendfile.png)
 
 > 这次相比sendfile()数据零拷贝，减少了一次从内核空间到与之相关的socket缓冲区的数据拷贝。
 >
@@ -885,9 +885,9 @@ class SimpleNettyClientHandler extends ChannelHandlerAdapter {
 
 > 问题1：使用「网络调试助手」测试上面的server。长字符串、中文，就会出现拆包、中文乱码的问题。
 >
-> ![image-20200820143936703](https://gitee.com/wangigor/typora-images/raw/master/netty-网络调试助手-长中文测试.png)
+> ![image-20200820143936703](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-网络调试助手-长中文测试.png)
 >
-> ![image-20200820144104058](https://gitee.com/wangigor/typora-images/raw/master/ netty-长中文测试-console.png)
+> ![image-20200820144104058](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/ netty-长中文测试-console.png)
 >
 > 问题2：之前的server的消息读取，「每次」都会有ByteBuf转String的操作。
 >
@@ -964,9 +964,9 @@ class StringNettyServerHandler extends ChannelHandlerAdapter{
 
 测试结果
 
-![image-20200820152209403](https://gitee.com/wangigor/typora-images/raw/master/netty-网络调试助手-长中文-优化.png)
+![image-20200820152209403](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-网络调试助手-长中文-优化.png)
 
-![image-20200820152303681](https://gitee.com/wangigor/typora-images/raw/master/netty-长中文-优化-console.png)
+![image-20200820152303681](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-长中文-优化-console.png)
 
 > 问题3：消息发送（回复）手动string转ByteBuf。
 >
@@ -1270,11 +1270,11 @@ class SimpleNettyClientHandler extends ChannelHandlerAdapter {
 
 - 完整包测试
 
-![image-20200824113548560](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-完整包测试.png)
+![image-20200824113548560](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-完整包测试.png)
 
 服务端console获取到的数据为
 
-![image-20200824113738422](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-完整包测试-server-console.png)
+![image-20200824113738422](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-完整包测试-server-console.png)
 
 解析数据
 
@@ -1301,17 +1301,17 @@ class SimpleNettyClientHandler extends ChannelHandlerAdapter {
 >
 > 第一次：
 >
-> ![image-20200824141255016](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-拆包测试-1.png)
+> ![image-20200824141255016](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-拆包测试-1.png)
 >
 > 此时通道处于等待后续数据状态。
 >
 > 第二次：
 >
-> ![image-20200824141815236](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-拆包测试-2_.png)
+> ![image-20200824141815236](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-拆包测试-2_.png)
 >
 > 服务端接收正常
 >
-> ![image-20200824141912767](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-拆包测试-console.png)
+> ![image-20200824141912767](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-拆包测试-console.png)
 >
 > 返回正常。
 
@@ -1319,9 +1319,9 @@ class SimpleNettyClientHandler extends ChannelHandlerAdapter {
 
 > 两个包一起发。
 >
-> ![image-20200824142105325](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-粘包测试.png)
+> ![image-20200824142105325](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-粘包测试.png)
 >
-> ![image-20200824142139936](https://gitee.com/wangigor/typora-images/raw/master/netty-自定义协议-粘包测试-console.png)
+> ![image-20200824142139936](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-自定义协议-粘包测试-console.png)
 >
 > 「两次」请求，「两次」响应。正常。
 
@@ -1385,7 +1385,7 @@ todo
 
 ## Selector
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/selector.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/selector.png)
 >
 >  SelectableChannel的多路复用器multiplexor。
 
@@ -1644,7 +1644,7 @@ sunos的实现是
 
 ### NioEventLoopGroup
 
-> ![image-20200908112212593](https://gitee.com/wangigor/typora-images/raw/master/NioEventLoopGroup.png)
+> ![image-20200908112212593](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/NioEventLoopGroup.png)
 >
 > 他是一个「**线程池**」。
 
@@ -1831,7 +1831,7 @@ public abstract class MultithreadEventLoopGroup extends MultithreadEventExecutor
 
 > 一个「工作线程」要监听处理channel的事件。
 >
-> ![image-20200908170624068](https://gitee.com/wangigor/typora-images/raw/master/NioEventLoop.png)
+> ![image-20200908170624068](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/NioEventLoop.png)
 >
 > 维护了一个线程，线程启动会调用润方法，执行io任务。
 >
@@ -2166,7 +2166,7 @@ private void processSelectedKeysOptimized(SelectionKey[] selectedKeys) {
 ```
 > debug一下
 >
-> ![image-20200916145342606](https://gitee.com/wangigor/typora-images/raw/master/netty-processSelectedKey-debug.png)
+> ![image-20200916145342606](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-processSelectedKey-debug.png)
 
 ```java
     private static void processSelectedKey(SelectionKey k, AbstractNioChannel ch) {
@@ -2361,7 +2361,7 @@ public class ReflectiveChannelFactory<T extends Channel> implements ChannelFacto
 
 > channelHandler用于处理我们的业务逻辑，基于Pipeline的自定义handler机制
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/channelHandler.jpg)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/channelHandler.jpg)
 
 ```java
 //通道初始化的模板类
@@ -3660,7 +3660,7 @@ public static void invokeConnectNow(
 >
 > 那我们就从NioEventLoop的processSelectedKey方法处理读事件「unsafe.read()」开始。
 >
-> ![image-20200916162038069](https://gitee.com/wangigor/typora-images/raw/master/netty-accept-unsafe-read-debug.png)
+> ![image-20200916162038069](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-accept-unsafe-read-debug.png)
 
 > 注意。这里的channel是**NioServerSocketChannel**。
 
@@ -3935,7 +3935,7 @@ private static class ServerBootstrapAcceptor extends ChannelHandlerAdapter {
 
 > NioEventLoop通过select得到的读事件 「NioEventLoop.processSelectedKey()」 -> 读ByteBuf -> 传递给handlerContext
 
-![image-20200917171859874](https://gitee.com/wangigor/typora-images/raw/master/netty-read-byteBuf.png)
+![image-20200917171859874](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-read-byteBuf.png)
 
 使用的是可自动回收的堆外内存。
 
@@ -3943,7 +3943,7 @@ private static class ServerBootstrapAcceptor extends ChannelHandlerAdapter {
 
 > 用户数据通过handlerContext -> 写ByteBuf的转换 -> 通道传输出去
 
-![image-20200917172657423](https://gitee.com/wangigor/typora-images/raw/master/netty-write-byteBuf.png)
+![image-20200917172657423](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-write-byteBuf.png)
 
 ```java
 protected final Object filterOutboundMessage(Object msg) {
@@ -3976,7 +3976,7 @@ protected final Object filterOutboundMessage(Object msg) {
 >
 > 内存规格分档：
 >
-> <img src="https://gitee.com/wangigor/typora-images/raw/master/netty-内存规格分档.png" alt="img" style="zoom: 33%;" />
+> <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-内存规格分档.png" alt="img" style="zoom: 33%;" />
 >
 > - **tiny** 0~512B
 > - **small** 512B~8K
@@ -3985,11 +3985,11 @@ protected final Object filterOutboundMessage(Object msg) {
 >
 > 下面是需要进行内存管理的池化内存模型
 >
-> <img src="https://gitee.com/wangigor/typora-images/raw/master/PoolArea结构.png" alt="image-20200924150614560" style="zoom:150%;" />
+> <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/PoolArea结构.png" alt="image-20200924150614560" style="zoom:150%;" />
 >
 > 内存在使用完，释放「release」时，不会真的释放而是加入cache中。
 >
-> ![image-20200927090908875](https://gitee.com/wangigor/typora-images/raw/master/PoolThreadCache结构.png)
+> ![image-20200927090908875](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/PoolThreadCache结构.png)
 
 ##### 分配内存allocte
 
@@ -4265,7 +4265,7 @@ protected PoolChunk<ByteBuffer> newChunk(int pageSize, int maxOrder, int pageShi
 }
 ```
 
-<img src="https://gitee.com/wangigor/typora-images/raw/master/netty-newChunk-DirectByteBuffer.png" alt="image-20200927143324525" style="zoom: 50%;" />
+<img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/netty-newChunk-DirectByteBuffer.png" alt="image-20200927143324525" style="zoom: 50%;" />
 
 记录了内存地址、大小，以及一个内存清理器cleaner。
 
@@ -4809,7 +4809,7 @@ void free(long handle) {
 
 > 为了减少对象频繁创建与销毁，减少GC压力。netty使用了Recycler对象池。
 >
-> ![image-20201010155517123](https://gitee.com/wangigor/typora-images/raw/master/Recycler对象池结构.png)
+> ![image-20201010155517123](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/Recycler对象池结构.png)
 >
 > - **「A线程」创建的对象被『A线程』回收，放入Stack-A的elements中。**
 > - **「A线程」创建的对象被『B线程』回收，放入Stack-A的WeakOrderQueue-B中。**

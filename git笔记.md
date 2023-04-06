@@ -64,14 +64,14 @@ git checkout -- 文件名
 >
 > 而`git rm --cached 文件名`只是不提交到暂存区。
 >
-> ![image-20210924144110451](https://gitee.com/wangigor/typora-images/raw/master/image-20210924144110451.png)
+> ![image-20210924144110451](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210924144110451.png)
 >
 > ```bash
 > # 从暂存区撤回「但本地文件系统保留对文件修改」
 > git rm --cached <文件>…
 > ```
 >
-> <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210924144223461.png" alt="image-20210924144223461" style="zoom:50%;" />
+> <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210924144223461.png" alt="image-20210924144223461" style="zoom:50%;" />
 
 
 
@@ -155,7 +155,7 @@ git checkout -- 文件名
 
   进入当前版本描述，修改保存
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210924155350672.png" alt="image-20210924155350672" style="zoom:50%;" />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210924155350672.png" alt="image-20210924155350672" style="zoom:50%;" />
 
   保存退出即可。
 
@@ -202,11 +202,11 @@ git有几种图示分支的方式
 
 - `git log --graph --all`
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925214959557.png" alt="image-20210925214959557" style="zoom:50%;" />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925214959557.png" alt="image-20210925214959557" style="zoom:50%;" />
 
   如果想要查看更加简介的版本可以增加`--oneline`参数
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925215145244.png" alt="image-20210925215145244" style="zoom:50%;" />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925215145244.png" alt="image-20210925215145244" style="zoom:50%;" />
 
 - 使用git gui
 
@@ -214,7 +214,7 @@ git有几种图示分支的方式
   gitk --all
   ```
 
-  ![image-20210925215412806](https://gitee.com/wangigor/typora-images/raw/master/image-20210925215412806.png)
+  ![image-20210925215412806](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925215412806.png)
 
 ### 合并
 
@@ -234,21 +234,21 @@ merge也有三种方式fast-forward、no-ff、squash。
 
   举例：在dev分支新提交文件dev.txt。
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925221856232.png" alt="image-20210925221856232"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925221856232.png" alt="image-20210925221856232"  />
 
   在master进行合并。
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222328409.png" alt="image-20210925222328409"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925222328409.png" alt="image-20210925222328409"  />
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222648536.png" alt="image-20210925222648536"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925222648536.png" alt="image-20210925222648536"  />
 
   这两个分支的id是一样的。在删除了dev分支之后，不会留下dev的记录「他就跟在master上提交了一个新版本一模一样。」
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925222918156.png" alt="image-20210925222918156"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925222918156.png" alt="image-20210925222918156"  />
 
   画张图标识就是这样。
 
-  ![image-20210925223624257](https://gitee.com/wangigor/typora-images/raw/master/image-20210925223624257.png)
+  ![image-20210925223624257](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925223624257.png)
 
 - **no-ff**
 
@@ -256,19 +256,19 @@ merge也有三种方式fast-forward、no-ff、squash。
   git merge --no-ff branch1
   ```
 
-  ![image-20210925224903267](https://gitee.com/wangigor/typora-images/raw/master/image-20210925224903267.png)
+  ![image-20210925224903267](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925224903267.png)
 
   下面这张图展示了合并过程。
 
-  ![image-20210925224539575](https://gitee.com/wangigor/typora-images/raw/master/image-20210925224539575.png)
+  ![image-20210925224539575](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925224539575.png)
 
   它会在合并分支「master」上创建一个新合并版本「Merge：m3」。
 
   master的log是这样的：
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925224713304.png" alt="image-20210925224713304"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925224713304.png" alt="image-20210925224713304"  />
 
-  <img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210925224809895.png" alt="image-20210925224809895"  />
+  <img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210925224809895.png" alt="image-20210925224809895"  />
 
   **branch1分支删除之后，master的记录依然存在。**
 
@@ -276,19 +276,19 @@ merge也有三种方式fast-forward、no-ff、squash。
 
   这个选项就是把之前的分支合并操作分为两步：①先**把待分支代码拉取到本地**。②在合并分支自行提交。
 
-  ![image-20210926092141782](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092141782.png)
+  ![image-20210926092141782](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926092141782.png)
 
   提交完成之后，只有master的一条记录「branch1合并记录不保留」。
 
-  ![image-20210926092350309](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092350309.png)
+  ![image-20210926092350309](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926092350309.png)
 
   graph图中能看到这个合并操作是断开的「分支`4c1b25c`和master `a8a3742`没有连接」。
 
-  ![image-20210926092602588](https://gitee.com/wangigor/typora-images/raw/master/image-20210926092602588.png)
+  ![image-20210926092602588](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926092602588.png)
 
   squash的流程是下面这样：
 
-  ![image-20210926093112397](https://gitee.com/wangigor/typora-images/raw/master/image-20210926093112397.png)
+  ![image-20210926093112397](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926093112397.png)
 
   可以理解为master拉取了`d1`分支的提交代码，以master的身份进行了提交「当然这里如果相对记录进行继续操作，当然可以」。
 
@@ -300,7 +300,7 @@ rebase的合并方式稍有不同，不止可以合并分支代码，它还包�
 
 假设有一个大功能，每天都会提交一点点代码。但是想在代码提交时只显示一个融合版本。
 
-![image-20210926094910426](https://gitee.com/wangigor/typora-images/raw/master/image-20210926094910426.png)
+![image-20210926094910426](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926094910426.png)
 
 > 目前在分支上就有一个功能的多次提交记录。
 
@@ -313,25 +313,25 @@ git rebase -i HEAD~3
 
 - 第一步就是三个版本的代码融合
 
-  ![image-20210926095544404](https://gitee.com/wangigor/typora-images/raw/master/image-20210926095544404.png)
+  ![image-20210926095544404](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926095544404.png)
 
   以第一个版本作为提交版本，其余「pick改为s的版本」追加到之前的版本。
 
 - 然后对三个版本设置一个统一的提交版本
 
-  ![image-20210926095924618](https://gitee.com/wangigor/typora-images/raw/master/image-20210926095924618.png)
+  ![image-20210926095924618](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926095924618.png)
 
   保存就提交。
 
-![image-20210926100030242](https://gitee.com/wangigor/typora-images/raw/master/image-20210926100030242.png)
+![image-20210926100030242](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926100030242.png)
 
 可以在log中看到之前的三条提交版本合并为一个版本。
 
-![image-20210926100215341](https://gitee.com/wangigor/typora-images/raw/master/image-20210926100215341.png)
+![image-20210926100215341](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926100215341.png)
 
 ##### 不同分支合并
 
-<img src="https://gitee.com/wangigor/typora-images/raw/master/image-20210926112527070.png" alt="image-20210926112527070" style="zoom:50%;" />
+<img src="https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926112527070.png" alt="image-20210926112527070" style="zoom:50%;" />
 
 最初，从`m2`版本开始，出现了不同的两个分支`m3「master」`和`d1「dev」`。下面进行合并。
 
@@ -352,7 +352,7 @@ git rebase -i HEAD~3
   >
   > 又在master上提交了新的修改版本「**80837f5** master_function_01」
 
-  ![image-20210926105733871](https://gitee.com/wangigor/typora-images/raw/master/image-20210926105733871.png)
+  ![image-20210926105733871](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926105733871.png)
 
   在rebase的时候因为`branch1`文件产生了冲突。按照提示执行即可。
 
@@ -366,11 +366,11 @@ git rebase -i HEAD~3
 
   而之前的d1版本「**9b105b** function01完整代码」也发生了改变。
 
-  ![image-20210926112112898](https://gitee.com/wangigor/typora-images/raw/master/image-20210926112112898.png)
+  ![image-20210926112112898](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926112112898.png)
 
   「**9b105b** function01完整代码」变成了「**f298175** function01完整代码」
 
-  ![image-20210926112603093](https://gitee.com/wangigor/typora-images/raw/master/image-20210926112603093.png)
+  ![image-20210926112603093](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926112603093.png)
 
 - 最后一步是**合并**。
 
@@ -381,7 +381,7 @@ git rebase -i HEAD~3
   git merge branch1
   ```
 
-  ![image-20210926113101579](https://gitee.com/wangigor/typora-images/raw/master/image-20210926113101579.png)
+  ![image-20210926113101579](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926113101579.png)
 
 #### cherry-pick
 
@@ -393,7 +393,7 @@ git cherry-pick <commitHash>
 
 比如，一个人同时开发不同功能模块，创建了两个分支。但是在一些基础模块可以复用。那么可以使用cherry-pick把基础模块提交的commitHash合并到本地分支。
 
-![image-20210926134027607](https://gitee.com/wangigor/typora-images/raw/master/image-20210926134027607.png)
+![image-20210926134027607](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926134027607.png)
 
 `d1`需要优先于`d2`提交。
 
@@ -478,7 +478,7 @@ cherry-pick有一些常用配置项。
 
 比如我就在gitee上创建了远程仓库「用于git操作实战」
 
-![image-20210926141944483](https://gitee.com/wangigor/typora-images/raw/master/image-20210926141944483.png)
+![image-20210926141944483](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926141944483.png)
 
 第一步就是**把本地的代码库和远程代码库进行关联**。
 
@@ -496,7 +496,7 @@ git remote
 git remote -v
 ```
 
-![image-20210926142800044](https://gitee.com/wangigor/typora-images/raw/master/image-20210926142800044.png)
+![image-20210926142800044](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926142800044.png)
 
 可以在本地分支上手动指定远程分支名称
 
@@ -545,7 +545,7 @@ git merge FETCH_HEAD
 
 这个`FETCH_HEAD`就是远程HEAD，可以通过`git log -p FETCH_HEAD`查看。
 
-![image-20210926144730280](https://gitee.com/wangigor/typora-images/raw/master/image-20210926144730280.png)
+![image-20210926144730280](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926144730280.png)
 
 
 
@@ -553,7 +553,7 @@ git merge FETCH_HEAD
 
 > 标签呢。可以理解为`commitHash`的传播版本「昨天晚上上线的commitHash是「f0d6c5fb0a177f6d765ceca812aeaa033cbf547d」，肯定不好理解与传播。」，可以把当前一个版本标记为人类能够看懂或者方便记录的版本号。
 
-![image-20210926150127585](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150127585.png)
+![image-20210926150127585](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926150127585.png)
 
 比如刚才的`f0d6c5fb0a177f6d765ceca812aeaa033cbf547d`就可以标记为`v1.0.0`版。
 
@@ -563,11 +563,11 @@ git tag -a v1.0.0
 
 需要填写这个标签的描述信息。
 
-![image-20210926150411193](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150411193.png)
+![image-20210926150411193](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926150411193.png)
 
 保存之后，就有了版本号。
 
-![image-20210926150526306](https://gitee.com/wangigor/typora-images/raw/master/image-20210926150526306.png)
+![image-20210926150526306](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926150526306.png)
 
 也可以通过`git tag`查看所有标签。
 
@@ -577,13 +577,13 @@ git tag -a v1.0.0
 git push origin --tags
 ```
 
-![image-20210926151017553](https://gitee.com/wangigor/typora-images/raw/master/image-20210926151017553.png)
+![image-20210926151017553](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926151017553.png)
 
-![image-20210926151046348](https://gitee.com/wangigor/typora-images/raw/master/image-20210926151046348.png)
+![image-20210926151046348](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926151046348.png)
 
 ## 工作流 WorkFlow
 
-![image-20210926161616455](https://gitee.com/wangigor/typora-images/raw/master/image-20210926161616455.jpeg)
+![image-20210926161616455](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20210926161616455.jpeg)
 
 
 

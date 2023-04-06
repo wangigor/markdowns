@@ -4,7 +4,7 @@
 
 ### fork-join「分支与合并」
 
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/fork-join.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/fork-join.jpeg)
 >
 > 案例：计算10亿个数字相加。四种方式：单线程、线程池、forkjoin、ForkJoinPool「java8」.
 
@@ -224,7 +224,7 @@ Process finished with exit code 0
 
 ### work-stealing「工作窃取」
 
-![img](https://gitee.com/wangigor/typora-images/raw/master/work-stealing.jpg)
+![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/work-stealing.jpg)
 
 > 可以理解为：线程池中的每个线程都对应一个任务双端队列。自己工作做完了，去别人那里取。
 
@@ -350,7 +350,7 @@ class Node<E> {
 
 > ForkJoinPool源码的位运算是真！的！多！
 >
-> ![image-20200908103416001](https://gitee.com/wangigor/typora-images/raw/master/forkjoinpool流程.png)
+> ![image-20200908103416001](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/forkjoinpool流程.png)
 >
 > - 每个线程对应两个队列
 >   - 偶数队列的任务来源于：外部业务线程
@@ -564,7 +564,7 @@ class Node<E> {
         }
       	
       	//未初始化完成或者容量满，走这里初始化和扩容。
-        externalSubmit(task);
+        externalSubmit(task); 
     }
 ```
 

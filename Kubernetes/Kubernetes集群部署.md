@@ -93,7 +93,7 @@ reboot
 ```shell
 yum install -y yum-utils device-mapper-persistent-data lvm2
 yum-config-manager --add-repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
-sed -i ‘s+download.docker.com+mirrors.aliyun.com/docker-ce+’ /etc/yum.repos.d/docker-ce.repo
+sed -i 's+download.docker.com+mirrors.aliyun.com/docker-ce+' /etc/yum.repos.d/docker-ce.repo
 yum install -y containerd.io cri-tools
 
 #生成containerd的配置文件
@@ -223,7 +223,7 @@ kubernetesVersion: 1.22.0
 networking:
   dnsDomain: cluster.local
   serviceSubnet: 10.96.0.0/12
- podSubnet: 10.244.0.0/16  # 指定pod ip的网段
+  podSubnet: 10.244.0.0/16  # 指定pod ip的网段
 scheduler: {}
 ```
 

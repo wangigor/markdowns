@@ -19,7 +19,7 @@ Vagrant.configure("2") do |config|
                         # 设置虚拟机的主机名
                         node.vm.hostname="kube-node0#{i}"
                         # 设置虚拟机的IP
-                        node.vm.network "private_network", ip: "192.168.59.#{99+i}", netmask: "255.255.255.0"
+                        node.vm.network "private_network", ip: "127.0.0.#{99+i}", netmask: "255.255.255.0"
                         # 设置主机与虚拟机的共享目录
                         node.vm.synced_folder "~/k8s-cluster/data/#{i}", "/home/vagrant/share"
                         # VirtaulBox相关配置
@@ -27,7 +27,7 @@ Vagrant.configure("2") do |config|
                                 # 设置虚拟机的名称
                                 v.name = "kube-node0#{i}"
                                 # 设置虚拟机的内存大小
-                                v.memory = 4096
+                                v.memory = 10240
                                 # 设置虚拟机的CPU个数
                                 v.cpus = 4
                         end

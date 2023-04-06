@@ -3066,3 +3066,35 @@ public class RowBounds {
 可以做==自定义缓存==的存数据拦截。不然。需要手动入缓存嘛。
 
 如果做了整库的全量缓存的话。可能更需要。而我还不知道。
+
+### 自定义缓存
+
+> 参考文档https://www.jianshu.com/p/2aa8c4c61ef8
+
+
+
+
+
+### 自定义分页
+
+> 参考文档https://www.jianshu.com/p/2aa8c4c61ef8
+
+
+
+# mybatis 缓存实验
+
+> 参考博客
+>
+> 你真的会用Mybatis的缓存么，不知道原理的话，容易踩坑哦
+> https://www.jianshu.com/p/c553169c5921
+> 从源码角度聊一聊JDBC和Mysql的预编译特性
+> https://my.oschina.net/kailuncen/blog/905395
+
+# mybatis实现分库分表
+
+
+
+# mybatis实现读写分离
+
+
+

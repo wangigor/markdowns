@@ -9,19 +9,19 @@
 
 ### 网卡和内存
 
-![网络分层](https://gitee.com/wangigor/typora-images/raw/master/网络分层.png)
+![网络分层](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/网络分层.png)
 
 >  **==网卡== Network Adapter**也被成为网络适配器，是一个硬件设备，有全球唯一的**MAC（media access control）**地址，mac地址在网卡生产时就被烧制在ROM中。
 >
 > 网卡收到的数据是**光信号或电信号**，然后将其**还原成数字信息**（0和1组成）。
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/1.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/1.png)
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/网卡数字信息结构.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/网卡数字信息结构.png)
 >
 > 根据FCS(帧校验序列，Frame Check Sequence)**校验数据**。判断数据传输在传输过程中是否因噪音等影响导致信号失真，从而导致数据丢失，需要**丢弃无效的数据包。**
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/Mac头部.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/Mac头部.png)
 >
 > 然后**检查数据包中的MAC头部中的接收方MAC地址**：如果不是发给自己的，**丢弃数据包**；如果数据包是发送给自己的，将**数字信息保存到网卡内部缓冲区。**
 >
@@ -52,14 +52,14 @@
 >
 > - IP模块检查IP头部以判断数据是不是发给自己
 >
-> ![IP头部](https://gitee.com/wangigor/typora-images/raw/master/IP头部.png)
+> ![IP头部](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/IP头部.png)
 >
 > - 判断数据包是否分片，如果分片则缓存起来**等待分片全部到达，还原数据包**。
 > - 根据IP头部的协议号字段，**将包转给TCP模块或者UDP模块**。
 
 **TCP模块**
 
-> ![TCP报文头部结构](https://gitee.com/wangigor/typora-images/raw/master/TCP报文头部结构.png)
+> ![TCP报文头部结构](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/TCP报文头部结构.png)
 >
 > TCP模块会根据**标志位**进行不同处理
 >
@@ -101,7 +101,7 @@
 >
 > 一般而言，**由硬件产生的信号需要cpu立马做出回应（不然数据可能就丢失），所以它的优先级很高。**cpu理应中断掉正在执行的程序，去做出响应；当cpu完成对硬件的响应后，再重新执行用户程序。中断的过程如下图，和函数调用差不多。只不过函数调用是事先定好位置，而中断的位置由“信号”决定。
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/中断.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/中断.png)
 >
 > 当网卡把数据写入到内存后，**网卡向cpu发出一个中断信号，操作系统便能得知有新数据到来**，再通过**网卡中断程序**去处理数据。
 
@@ -134,13 +134,13 @@
 >
 > 下图中的计算机中运行着A、B、C三个线程，其中线程A执行着上述基础网络程序，一开始，这3个线程都被操作系统的工作队列所引用，处于运行状态，会分时执行。
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/工作队列.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/工作队列.png)
 
 ##### 等待队列
 
 > 当程序执行到recv时，操作系统会将线程A从工作队列移动到该socket的等待队列中（如下图）。由于工作队列只剩下了线程B和C，依据进程调度，cpu会轮流执行这两个线程的程序，不会执行线程A的程序。**所以线程A被阻塞，不会往下执行代码，也不会占用cpu资源**。
 >
-> ![img](https://gitee.com/wangigor/typora-images/raw/master/等待队列.png)
+> ![img](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/等待队列.png)
 >
 > 操作系统添加等待队列只是添加了对这个“等待中”线程的引用，以便在接收到数据时获取进程对象、将其唤醒，而非直接将线程管理纳入自己之下。
 

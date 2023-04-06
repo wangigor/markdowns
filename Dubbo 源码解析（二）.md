@@ -2419,6 +2419,7 @@ IUserService {
       	//有两个子类实现，动态/静态。
         return doList(invocation);
     }
+
 ```
 
 ##### 动态服务字典
@@ -3960,35 +3961,7 @@ public class DefaultFuture extends CompletableFuture<Object> {
         timeoutCheck(future);
         return future;
     }
-
-		//收到回复
-    public static void sent(Channel channel, Request request) {
-        DefaultFuture future = FUTURES.get(request.getId());
-        if (future != null) {
-            future.doSent();
-        }
-    }
-
-   	//channel关闭时，需要把所有的channel对应的request对应的Future，置为通道不活跃的错误回复
-    public static void closeChannel(Channel channel) {
-        for (Map.Entry<Long, Channel> entry : CHANNELS.entrySet()) {
-            if (channel.equals(entry.getValue())) {
-                DefaultFuture future = getFuture(entry.getKey());
-                if (future != null && !future.isDone()) {
-                    Response disconnectResponse = new Response(future.getId());
-                    disconnectResponse.setStatus(Response.CHANNEL_INACTIVE);
-                    disconnectResponse.setErrorMessage("Channel " +
-                            channel +
-                            " is inactive. Directly return the unFinished request : " +
-                            future.getRequest());
-                    DefaultFuture.received(channel, disconnectResponse);
-                }
-            }
-        }
-    }
-		
-  	//接收方法 重载
-    public static void received(Channel channel, Response response) {
+onse) {
         received(channel, response, false);
     }
 

@@ -1,0 +1,13 @@
+default:
+  image: alpine:latest
+  before_script:
+    - echo "Hello World"
+
+stages:
+  - stage1
+
+step1:
+  stage: stage1
+  script:
+    - echo "Hello Universe"
+
