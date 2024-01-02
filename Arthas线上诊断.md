@@ -135,7 +135,7 @@ public class EchoController {
 - 先把jad的反编译文件输出到临时文件中
 
   ```bash
-  jad --source-only com.cmos.retail.web.EchoController > /tmp/redefineFiles/EchoComtroller.java
+  jad --source-only com.cmos.retail.web.EchoController > /tmp/redefineFiles/EchoController.java
   ```
 
 - 打开一个新的终端，修改临时文件。
