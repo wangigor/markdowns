@@ -299,11 +299,12 @@ $ etcd --version
 对于每台虚拟机（13.133.222.3、13.133.222.4、13.133.222.5），执行以下步骤：
 
 1. **下载etcd**：
+   
    - 使用`wget`来下载etcd的压缩包：
      ```bash
      wget https://github.com/etcd-io/etcd/releases/download/v3.5.0/etcd-v3.5.0-linux-amd64.tar.gz
      ```
-
+   
 2. **解压etcd**：
    - 使用`tar`命令解压下载的文件：
      ```bash
@@ -518,3 +519,101 @@ key-file: "/path/to/server.key"
 etcdctl --cert="/path/to/client.crt" --key="/path/to/client.key" --cacert="/path/to/ca.crt" member list
 ```
 
+## 使用
+
+### 命令行etcdctl
+
+使用已经搭建好的三节点etcd集群主要涉及两个方面：使用etcd的命令行客户端工具进行操作和编程接口的方式。
+
+### 使用etcd命令行客户端
+
+etcd提供了一个命令行客户端工具`etcdctl`，它是与etcd交互的主要方式。通过`etcdctl`，你可以执行各种操作，如设置和获取键值、删除键、列出键、监视更改等。这里有一些基本的`etcdctl`命令示例：
+
+- 设置键值对：
+  ```bash
+  etcdctl put mykey "Hello etcd"
+  ```
+- 获取键值：
+  ```bash
+  etcdctl get mykey
+  ```
+- 删除键：
+  ```bash
+  etcdctl del mykey
+  ```
+- 列出所有键：
+  ```bash
+  etcdctl get --prefix ""
+  ```
+
+如果你的etcd集群启用了TLS加密，你还需要在`etcdctl`命令中指定证书文件。
+
+### 管理客户端
+
+[etcd-manager](https://etcdmanager.io/#installation)
+
+![image-20240125165254614](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20240125165254614.png)
+
+### java demo
+
+首先，您需要将`jetcd`库添加到项目中。可以在`pom.xml`文件中添加以下依赖：
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>io.etcd</groupId>
+        <artifactId>jetcd-core</artifactId>
+        <version>0.5.0</version>
+    </dependency>
+</dependencies>
+```
+
+接下来，以下是一个简单的Java程序，演示如何连接到etcd集群并执行基本操作：
+
+```java
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.KV;
+import io.etcd.jetcd.kv.GetResponse;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
+public class EtcdClientExample {
+    public static void main(String[] args) {
+        // 创建etcd客户端连接
+        Client client = Client.builder()
+                .endpoints(
+                    "http://13.133.222.4:32379", 
+                    "http://13.133.222.5:32379", 
+                    "http://13.133.222.3:32379")
+                .build();
+
+        // 获取键值存储的客户端
+        KV kvClient = client.getKVClient();
+
+        try {
+            // 存储键值对
+            kvClient.put(client.getKVClient().getByteSequence("test_key"),
+                         client.getKVClient().getByteSequence("Hello etcd")).get();
+
+            // 获取键值对
+            CompletableFuture<GetResponse> getFuture = 
+                    kvClient.get(client.getKVClient().getByteSequence("test_key"));
+            GetResponse response = getFuture.get();
+            response.getKvs().forEach(kv -> System.out.println("Found key-value pair: " + 
+                    kv.getKey().toStringUtf8() + " - " + kv.getValue().toStringUtf8()));
+        } catch (InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        } finally {
+            // 关闭客户端
+            client.close();
+        }
+    }
+}
+```
+
+这个示例程序演示了如何创建一个etcd客户端，连接到您的集群，然后执行基本的put和get操作。这里的连接池是由etcd客户端库内部管理的，通常不需要手动实现连接池。
+
+请注意，这个例子使用了硬编码的etcd端点和键值。
+
+在实际应用中，您可能需要根据环境或配置文件动态配置这些值。
