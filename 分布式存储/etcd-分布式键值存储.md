@@ -290,6 +290,8 @@ $ etcd --version
 
 ### 多机集群部署
 
+> [官方集群部署文档](https://etcd.io/docs/v3.5/op-guide/clustering/)
+
 部署一个由三个节点组成的etcd集群到三台独立的虚拟机（CentOS Linux 7）上，涉及以下详细步骤：
 
 **步骤1：在所有虚拟机上安装etcd**
