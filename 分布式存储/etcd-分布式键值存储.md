@@ -331,8 +331,8 @@ $ etcd --version
      name: 'etcd1'
      data-dir: '/var/lib/etcd'
      initial-advertise-peer-urls: 'http://13.133.222.3:2380'
-     listen-peer-urls: 'http://0.0.0.0:2380'
-     listen-client-urls: 'http://0.0.0.0:2379,http://127.0.0.1:2379'
+     listen-peer-urls: 'http://13.133.222.3:2380'
+     listen-client-urls: 'http://13.133.222.3:2379,http://127.0.0.1:2379'
      advertise-client-urls: 'http://13.133.222.3:2379'
      initial-cluster: 'etcd1=http://13.133.222.3:2380,etcd2=http://13.133.222.4:2380,etcd3=http://13.133.222.5:2380'
      initial-cluster-state: 'new'
@@ -345,7 +345,7 @@ $ etcd --version
 在每台虚拟机上，使用以下命令启动etcd服务：
 
 ```bash
-etcd --config-file /etc/etcd.conf
+etcd --config-file /etc/etcd.conf >> /var/log/etcd.log 2>&1 &
 ```
 
 **步骤4：验证集群状态**
@@ -354,7 +354,6 @@ etcd --config-file /etc/etcd.conf
 
 ```bash
 etcdctl member list
-etcdctl cluster-health
 ```
 
 **注意事项**
@@ -403,3 +402,10 @@ etcdctl cluster-health
   > 通过实施这些策略，可以有效地提高etcd集群的可靠性和容错能力，确保关键数据的安全。
 
 这些步骤将在您的虚拟机上创建一个基本的etcd集群，适用于模拟生产环境的高可用部署。
+
+> etcd启动告警 member xxxxxxxxxxx has already been bootstrapped
+>
+> - 方法一： 该节点已经被引导，可能是因为之前这个节点已经加入过集群了，但配置失败，在启动参数那里设置的是**new**，所以需要将 --initial-cluster-state=**new** 修改成  --initial-cluster-state=existing。 改别的设置文件均不可行，etcd.service才是启动项。 
+>
+> - 方法二：把所有etcd节点的 data-dir 文件 rm  /var/lib/etcd/member/*  -rf 然后重启。
+
