@@ -15,81 +15,111 @@ Keepalived在网络服务和云计算领域中被广泛使用，特别适合需�
 
 
 
-## LVS
+## 使用及验证
 
-我有三台虚拟机「13.133.222.3/13.133.222.4/13.133.222.5」可以将一台虚拟机作为LVS调度器（负载均衡器），其他两台作为真实服务器（后端服务器）。这里，我们假设13.133.222.3作为LVS调度器，13.133.222.4和13.133.222.5作为后端服务器。以下是一个基于LVS的简单配置示例，我们将采用LVS的NAT模式进行配置。
+为了使用`keepalived`在你的三台虚拟机（13.133.222.3, 13.133.222.4, 13.133.222.5）上实现高可用性配置，我们将通过以下步骤进行：
 
-### 环境准备
+### 1. 安装Keepalived
 
-- LVS调度器（Load Balancer）：13.133.222.3
-- 真实服务器1：13.133.222.4
-- 真实服务器2：13.133.222.5
-- 虚拟服务IP（VIP）：13.133.222.13（假设）
-- 服务端口：80（HTTP服务为例）
+首先，在所有三台虚拟机上安装`keepalived`。以CentOS为例，使用yum进行安装：
 
-### 步骤1：配置LVS调度器
+```sh
+sudo yum install keepalived -y
+```
 
-1. **安装ipvsadm工具**（在13.133.222.3上执行）
+### 2. 配置Keepalived
 
-   ```bash
-   sudo yum install ipvsadm -y
-   ```
+我们将配置这三台虚拟机，其中一台作为主（Master）服务器，其他两台作为备份（Backup）服务器。我们将使用虚拟IP地址（VIP）13.133.222.13作为服务的高可用地址。
 
-2. **配置LVS规则**（选择NAT模式，以HTTP服务为例）
+#### 主服务器配置（13.133.222.3）
 
-   ```bash
-   # 添加虚拟服务
-   sudo ipvsadm -A -t 13.133.222.13:80 -s rr
-   
-   # 添加真实服务器
-   sudo ipvsadm -a -t 13.133.222.13:80 -r 13.133.222.4:80 -m
-   sudo ipvsadm -a -t 13.133.222.13:80 -r 13.133.222.5:80 -m
-   ```
+在13.133.222.3上，编辑`/etc/keepalived/keepalived.conf`文件，添加如下配置：
 
-   这里`-s rr`表示使用轮询（round-robin）算法，`-m`表示NAT模式。
+```nginx
+vrrp_instance VI_1 {
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        13.133.222.13/24
+    }
+}
+```
 
-3. **启用IP转发**（确保LVS调度器能够转发包）
+- `state MASTER`表明这台服务器为主服务器。
+- `interface eth0`可能需要根据你的网络接口名称进行调整。
+- `virtual_router_id`是VRRP实例的ID，需要在所有服务器上保持一致。
+- `priority`设置了服务器的优先级，主服务器的优先级应该最高。
 
-   ```bash
-   echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-   ```
+#### 备份服务器配置（13.133.222.4和13.133.222.5）
 
-### 步骤2：配置真实服务器
+在13.133.222.4和13.133.222.5上，进行类似的配置，只是将`state`改为`BACKUP`，并适当降低`priority`。
 
-对于13.133.222.4和13.133.222.5上的每台服务器，确保它们能够处理转发到它们的请求。在NAT模式下，服务器需要将返回流量路由到LVS调度器。这通常意味着调整默认网关或特定路由，使得回应客户端的流量通过LVS调度器。
+**13.133.222.4的配置**：
 
-1. **配置默认网关**（或特定路由，以13.133.222.3为网关）
+```nginx
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    virtual_router_id 51
+    priority 90
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        13.133.222.13/24
+    }
+}
+```
 
-   ```bash
-   sudo ip route add default via 13.133.222.3
-   ```
+**13.133.222.5的配置**：
 
-2. **配置和启动Web服务**（确保两台后端服务器都运行了HTTP服务）
+调整`priority`为80或其他，以区分不同的备份服务器。
 
-   ```bash
-   # 以安装和启动Apache HTTP服务器为例
-   sudo yum install httpd -y
-   echo "Hello from $(hostname)" | sudo tee /var/www/html/index.html
-   sudo systemctl start httpd
-   sudo systemctl enable httpd
-   ```
+### 3. 启动Keepalived
 
-### 步骤3：验证配置
+在所有三台虚拟机上启动`keepalived`服务：
 
-1. **查看LVS规则**
+```sh
+sudo systemctl start keepalived
+sudo systemctl enable keepalived
+```
 
-   ```bash
-   sudo ipvsadm -Ln
-   ```
+### 4. 验证配置
 
-2. **从客户端测试**
+- **检查Keepalived状态**：
 
-   访问虚拟服务IP（13.133.222.13）上的HTTP服务，可以使用浏览器或命令行工具如`curl`：
+  在每台服务器上检查`keepalived`的状态，确保服务正在运行：
 
-   ```bash
-   curl http://13.133.222.13
-   ```
+  ```sh
+  sudo systemctl status keepalived
+  ```
 
-   多次执行这个命令应该可以看到请求被轮流分发到两台真实服务器。
+- **查看VIP**：
 
-![image-20240225175231438](https://wangigor-typora-images.oss-cn-chengdu.aliyuncs.com/image-20240225175231438.png)
+  在每台服务器上使用`ip addr show`命令，检查虚拟IP地址是否已正确绑定到主服务器上。
+
+- **测试高可用性**：
+
+  从主服务器（13.133.222.3）上手动停止`keepalived`服务，看看VIP是否会自动转移到一个备份服务器上：
+
+  ```sh
+  sudo systemctl stop keepalived
+  ```
+
+  然后在其他服务器上再次使用`ip addr show`命令检查VIP的绑定情况。
+
+### 注意
+
+- 根据你的实际网络接口名称（如`eth0`），你可能需要调整配置文件中的`interface`值。
+- 确保所有服务器的防火墙设置允许VRRP通信（使用IP协议编号112）。
+
+通过这个基本的`keepalived`配置，你应该能够在三台虚拟机上实现一个简单的高可用性设置，其中一台作为主服务器，另外两台作为备份，以确保服务的连续可用性。
