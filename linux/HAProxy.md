@@ -198,6 +198,80 @@ frontend http_front
 
 ACL是HAProxy配置中非常灵活且强大的部分，通过精心设计，可以实现高度定制的请求路由策略，有效提升应用的安全性、可用性和性能。
 
+### 7.健康检查
+
+HAProxy的高级健康检查功能提供了更灵活和详细的控制，以适应不同应用场景的需求。这些高级功能允许基于多样化的条件进行健康检查，从而更准确地评估后端服务器的健康状态。以下是一些高级健康检查的配置示例和说明：
+
+**响应状态码范围**
+
+你可以配置HAProxy以接受一系列的HTTP状态码作为健康检查通过的条件。这在某些情况下非常有用，比如当后端服务返回多个不同的成功状态码时。
+
+```haproxy
+backend web_backend
+    mode http
+    option httpchk GET /health
+    http-check expect rstatus ^2[0-9][0-9]$
+    server web1 192.168.0.3:80 check
+```
+
+这里的`http-check expect rstatus ^2[0-9][0-9]$`表示任何200-299之间的状态码都被认为是健康的。
+
+**检查响应内容**
+
+HAProxy可以根据HTTP健康检查的响应体内容来判断服务是否健康。这对于确保后端服务不仅能够响应请求，而且返回预期内容非常有用。
+
+```haproxy
+backend api_backend
+    mode http
+    option httpchk GET /api/health
+    http-check expect string healthy
+    server api1 192.168.0.5:80 check
+```
+
+在这个配置中，只有当`/api/health`路径返回的响应体中包含`healthy`字符串时，`api1`服务器才被认为是健康的。
+
+**自定义健康检查条件**
+
+HAProxy还允许定义更复杂的健康检查条件，例如结合使用多个`http-check expect`条件。
+
+```haproxy
+backend complex_backend
+    mode http
+    option httpchk GET /complex/health
+    http-check expect rstatus ^2[0-9][0-9]$
+    http-check expect ! string error
+    server complex1 192.168.0.6:80 check
+```
+
+这里，后端服务必须返回一个200-299之间的状态码，并且响应体中不包含`error`字符串，服务才被视为健康。
+
+**使用Lua脚本进行健康检查**
+
+对于需要高度自定义逻辑的健康检查，HAProxy支持使用Lua脚本。这使得你可以编写复杂的检查逻辑，例如基于响应内容的特定模式或动态变化的条件。
+
+要使用Lua脚本进行健康检查，你需要在`global`部分引入Lua脚本文件，并在`backend`配置中引用具体的Lua函数作为健康检查逻辑。
+
+```haproxy
+global
+    lua-load /etc/haproxy/healthcheck.lua
+
+backend lua_backend
+    mode http
+    option httpchk GET /lua/health
+    http-check expect lua.is_healthy
+    server lua1 192.168.0.7:80 check
+```
+
+这个示例中，`healthcheck.lua`是一个Lua脚本文件，其中包含名为`is_healthy`的函数，HAProxy会调用这个函数来执行健康检查。
+
+**注意事项**
+
+- 使用高级健康检查特性时，确保检查逻辑与后端服务的实际健康状况和预期行为相匹配。
+- 复杂的健康检查逻辑可能增加HAProxy的处理负担，特别是在高流量场景下。合理设计健康检查，避免不必要的性能开销。
+- 在生产环境中部署新的健康检查配置之前，应该进行充分的测试，确保配置按预期工作，不会误判服务健康状态。
+
+通过使用HAProxy的高级健康检查功能，你可以更精细地控制流量分发逻辑，确保用户请求仅被路由到真正健康的后端服务，从而提高应用的可用性和用户体验。
+
 ### 结语
 
 这是一个HAProxy入门级的使用示例，涵盖了安装、基本配置和启动服务的步骤。随着你对HAProxy的熟悉，你可以探索更高级的功能和配置选项，如SSL/TLS终端、更复杂的负载均衡规则、持久化连接等，来满足特定的负载均衡需求。
